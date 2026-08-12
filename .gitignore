@@ -1,0 +1,14 @@
+# ── 私密配置(切勿提交真实账号密码) ──
+config.json
+
+# ── Rust 构建产物 ──
+target/
+
+# ── 运行时产物 ──
+srun_service.log
+
+# ── 编辑器/系统 ──
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

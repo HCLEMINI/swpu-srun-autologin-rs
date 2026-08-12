@@ -1,0 +1,8 @@
+{
+  "server": "172.16.245.50",
+  "ac_id": "1",
+  "username": "你的学号",
+  "password": "你的密码",
+  "domain": "@yd",
+  "check_interval": 20
+}
