@@ -1,12 +1,15 @@
 //! Win32 原生 GUI + 托盘 + 后台监控(零 GUI 框架, 保持二进制极小)
 //! 布局: 状态行[●状态][连接][断开][检测] / 账号 / 密码 / 线路·服务器 / 间隔·自启 / 保存 / 日志
 
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetStockObject, SetTextColor, UpdateWindow, WHITE_BRUSH, DEFAULT_GUI_FONT,
+    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, GetStockObject, ReleaseDC, SetBitmapBits,
+    SetTextColor, UpdateWindow, WHITE_BRUSH, DEFAULT_GUI_FONT, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
+    DIB_RGB_COLORS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
@@ -23,6 +26,116 @@ use crate::srun::{self, SrunClient};
 /// COLORREF: 0x00BBGGRR
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+}
+
+// ------------------------------------------------------------------ //
+//  状态托盘图标: 纯代码生成圆形图标(灰=检测中 / 绿=已连接 / 红=无网络 / 橙=连接中)
+// ------------------------------------------------------------------ //
+const ICON_COLORS: [u32; 4] = [0xFF888888, 0xFF2E8B57, 0xFFC0392B, 0xFFE08A00];
+// HICON=*mut c_void 非 Send/Sync, 故存 isize 再转换
+static TRAY_ICONS: OnceLock<[isize; 4]> = OnceLock::new();
+
+fn tray_icon(idx: usize) -> HICON {
+    TRAY_ICONS
+        .get()
+        .map(|a| a[idx] as HICON)
+        .unwrap_or(std::ptr::null_mut())
+}
+
+fn status_icon_idx(status: Status) -> usize {
+    match status {
+        Status::Online => 1,
+        Status::Offline => 2,
+        Status::Busy => 3,
+    }
+}
+
+/// 生成 32x32 ARGB 圆形图标(抗锯齿边缘, 预乘 alpha)
+unsafe fn make_status_icon(color: u32) -> HICON {
+    const S: i32 = 32;
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = S;
+    bmi.bmiHeader.biHeight = -S; // 自上而下
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    let hdc = GetDC(std::ptr::null_mut());
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let hbmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+    ReleaseDC(std::ptr::null_mut(), hdc);
+    if hbmp.is_null() || bits.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let px = std::slice::from_raw_parts_mut(bits as *mut u32, (S * S) as usize);
+    let (r_in, r_out) = (13.0f64, 14.5f64);
+    let center = (S as f64 - 1.0) / 2.0;
+    let (cr, cg, cb) = ((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+    for y in 0..S {
+        for x in 0..S {
+            let dx = x as f64 - center;
+            let dy = y as f64 - center;
+            let d = (dx * dx + dy * dy).sqrt();
+            let alpha = if d <= r_in {
+                1.0
+            } else if d < r_out {
+                1.0 - (d - r_in) / (r_out - r_in)
+            } else {
+                0.0
+            };
+            if alpha <= 0.0 {
+                px[(y * S + x) as usize] = 0;
+            } else {
+                let a = (alpha * 255.0).round() as u32;
+                // 预乘 alpha; u32 内存序 = BGRA
+                px[(y * S + x) as usize] = (a << 24)
+                    | ((cr * a / 255) << 16)
+                    | ((cg * a / 255) << 8)
+                    | (cb * a / 255);
+            }
+        }
+    }
+
+    // 1bpp 掩码位图(全 1)
+    let hbmp_mask = CreateBitmap(S, S, 1, 1, std::ptr::null());
+    let mask_buf = vec![0xFFu8; ((S * S) / 8 + 8) as usize];
+    SetBitmapBits(hbmp_mask, mask_buf.len() as u32, mask_buf.as_ptr() as *const c_void);
+
+    let mut ii: ICONINFO = std::mem::zeroed();
+    ii.fIcon = 1;
+    ii.hbmColor = hbmp;
+    ii.hbmMask = hbmp_mask;
+    let hicon = CreateIconIndirect(&ii);
+    DeleteObject(hbmp);
+    DeleteObject(hbmp_mask);
+    hicon
+}
+
+fn init_tray_icons() {
+    let icons = unsafe {
+        [
+            make_status_icon(ICON_COLORS[0]),
+            make_status_icon(ICON_COLORS[1]),
+            make_status_icon(ICON_COLORS[2]),
+            make_status_icon(ICON_COLORS[3]),
+        ]
+    };
+    let _ = TRAY_ICONS.set(icons.map(|h| h as isize));
+}
+
+fn destroy_tray_icons() {
+    if let Some(icons) = TRAY_ICONS.get() {
+        unsafe {
+            for &i in icons {
+                let h = i as HICON;
+                if !h.is_null() {
+                    DestroyIcon(h);
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //
@@ -264,8 +377,12 @@ unsafe fn add_tray(hwnd: HWND) {
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = LoadIconW(GetModuleHandleW(std::ptr::null()), IDI_APPLICATION);
-    set_tip(&mut nid, "校园网登录");
+    // 初始: 灰色(检测中)
+    nid.hIcon = tray_icon(0);
+    if nid.hIcon.is_null() {
+        nid.hIcon = LoadIconW(GetModuleHandleW(std::ptr::null()), IDI_APPLICATION);
+    }
+    set_tip(&mut nid, "校园网登录 · 检测中");
     Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
@@ -409,13 +526,14 @@ fn update_status_ui(hwnd: HWND, status: Status) {
     if !st.is_null() {
         set_text(st, text);
     }
-    // 托盘提示同步
+    // 托盘图标 + 提示同步(绿=已连接 / 红=无网络 / 橙=连接中)
     unsafe {
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
         nid.uID = 1;
-        nid.uFlags = NIF_TIP;
+        nid.uFlags = NIF_ICON | NIF_TIP;
+        nid.hIcon = tray_icon(status_icon_idx(status));
         set_tip(&mut nid, &format!("校园网登录 · {}", text.trim_start_matches("● ")));
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -588,6 +706,7 @@ pub fn run() -> ! {
             let chk = if crate::autostart::enabled() { BST_CHECKED as WPARAM } else { 0 };
             SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTO), BM_SETCHECK, chk, 0);
         }
+        init_tray_icons();
         add_tray(hwnd);
         SetTimer(hwnd, WM_TIMER_POLL, 500, None);
 
@@ -615,5 +734,6 @@ pub fn run() -> ! {
             DispatchMessageW(&msg);
         }
     }
+    destroy_tray_icons();
     std::process::exit(0);
 }
