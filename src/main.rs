@@ -2,6 +2,9 @@
 //! 用法: srun [--check] [--login] [--logout] [--headless] [--install] [--uninstall]
 //! 默认: 启动 GUI
 
+// 关键: GUI 子系统, 双击不弹终端窗口(从 cmd 运行输出仍正常)
+#![windows_subsystem = "windows"]
+
 mod config;
 mod crypto;
 mod http;
