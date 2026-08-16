@@ -77,6 +77,18 @@ fn run_headless() -> ! {
         std::process::exit(1);
     }
     let client = client_from(&cfg);
+    // 关机/注销/重启前先退出登录(校园网直接断电会触发 reject, 下次开机被拒连 WiFi)
+    crate::shutdown::watch(|| {
+        let cfg = config::load();
+        if cfg.username.is_empty() {
+            return;
+        }
+        let client = client_from(&cfg);
+        match client.logout() {
+            Ok(e) => println!("{} 🔌 系统关机/注销, 已退出登录 ({})", ts(), e),
+            Err(e) => println!("{} 🔌 关机注销失败(网络可能已断开): {}", ts(), e),
+        }
+    });
     let mut last_online: Option<bool> = None;
     let mut fail = 0u32;
     loop {
@@ -202,3 +214,4 @@ fn main() {
 
 mod autostart;
 mod gui;
+mod shutdown;

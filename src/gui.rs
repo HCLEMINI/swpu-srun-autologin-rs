@@ -514,6 +514,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             GetStockObject(WHITE_BRUSH) as LRESULT
         }
+        // 关机/注销/重启: 先退出登录, 避免校园网 reject(直接断电会被标记异常, 下次开机拒连 WiFi)
+        WM_QUERYENDSESSION => 1, // 立即放行关机; 注销放到 WM_ENDSESSION 阶段(系统已决定关机, 不等待响应)
+        WM_ENDSESSION if wparam != 0 => {
+            push_log("🔌 检测到系统关机/注销, 退出登录中…");
+            let cfg = SHARED
+                .get()
+                .and_then(|s| s.lock().ok())
+                .map(|g| g.cfg.clone());
+            if let Some(cfg) = cfg {
+                if !cfg.username.is_empty() {
+                    match client_from_cfg(&cfg).logout() {
+                        Ok(e) => push_log(&format!("已注销 ({})", e)),
+                        Err(e) => push_log(&format!("注销失败(网络可能已断开): {}", e)),
+                    }
+                }
+            }
+            PostQuitMessage(0);
+            0
+        }
         WM_CLOSE => {
             remove_tray(hwnd);
             DestroyWindow(hwnd);
