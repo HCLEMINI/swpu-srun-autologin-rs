@@ -1,5 +1,5 @@
 //! Win32 原生 GUI + 托盘 + 后台监控(零 GUI 框架, 保持二进制极小)
-//! 布局: 状态行[●状态][连接][断开][检测] / 账号 / 密码 / 线路·服务器 / 间隔·自启 / 保存 / 日志
+//! 布局: 状态行[●状态][连接][断开][检测] / 账号 / 密码 / 线路·服务器 / 间隔·自启 / WiFi / 保存 / 日志
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -22,6 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::config;
 use crate::config::Config;
 use crate::srun::{self, SrunClient};
+use crate::wifi;
 
 /// COLORREF: 0x00BBGGRR
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -197,6 +198,7 @@ const ID_BTN_CHECK: i32 = 108;
 const ID_BTN_SAVE: i32 = 109;
 const ID_LOG: i32 = 110;
 const ID_CHK_AUTO: i32 = 111;
+const ID_WIFI: i32 = 112;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_TIMER_POLL: usize = 1;
@@ -287,6 +289,7 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
         match rx.try_recv() {
             Ok(Cmd::Login) => {
                 let cfg = shared.lock().unwrap().cfg.clone();
+                ensure_wifi(&cfg);
                 let _ = do_login(&cfg);
                 let on = srun::is_online();
                 set_status(if on { Status::Online } else { Status::Offline });
@@ -331,6 +334,7 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
             }
             if !on {
                 let cfg = shared.lock().unwrap().cfg.clone();
+                ensure_wifi(&cfg); // 断网时先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
                 let ok = do_login(&cfg);
                 fail = if ok { 0 } else { fail + 1 };
                 let on2 = srun::is_online();
@@ -341,6 +345,21 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+/// 断网重连前的 WiFi 保障: 未连接目标 SSID 则自动连接(仅当已配置 SSID)
+fn ensure_wifi(cfg: &Config) {
+    if cfg.wifi_ssid.trim().is_empty() {
+        return;
+    }
+    match wifi::ensure(&cfg.wifi_ssid) {
+        Ok(false) => {
+            push_log(&format!("📶 WiFi 已自动连接 {}", cfg.wifi_ssid));
+            std::thread::sleep(std::time::Duration::from_secs(3)); // 等关联+DHCP
+        }
+        Ok(true) => {}
+        Err(e) => push_log(&format!("⚠ WiFi: {}", e)),
     }
 }
 
@@ -559,6 +578,7 @@ fn save_settings(hwnd: HWND) {
             .copied()
             .unwrap_or("@yd")
             .to_string();
+        let wifi_ssid = get_text(GetDlgItem(hwnd, ID_WIFI)).trim().to_string();
         let cfg = Config {
             server: if server.is_empty() { "172.16.245.50".into() } else { server },
             ac_id: "1".into(),
@@ -566,6 +586,7 @@ fn save_settings(hwnd: HWND) {
             password: pwd,
             domain,
             check_interval: interval,
+            wifi_ssid,
         };
         let _ = config::save(&cfg);
         if let Some(s) = SHARED.get() {
@@ -632,6 +653,9 @@ fn create_controls(hwnd: HWND) {
         mk("EDIT", "20", ID_INTERVAL, edit, 66, 144, 50, 24);
         mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 130, 148, 160, 20);
         mk("BUTTON", "保存设置", ID_BTN_SAVE, btn | BS_PUSHBUTTON as u32, 376, 144, 70, 26);
+        mk("STATIC", "WiFi名", 0, label, 10, 176, 52, 22);
+        mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 66, 174, 230, 24);
+        mk("STATIC", "(留空=不自动连WiFi)", 0, label, 302, 178, 140, 20);
 
         // 日志
         mk(
@@ -639,7 +663,7 @@ fn create_controls(hwnd: HWND) {
             "",
             ID_LOG,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
-            10, 182, 436, 340,
+            10, 214, 436, 310,
         );
     }
 }
@@ -681,7 +705,7 @@ pub fn run() -> ! {
             class.as_ptr(),
             w("校园网自动登录").as_ptr(),
             WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT, CW_USEDEFAULT, 470, 560,
+            CW_USEDEFAULT, CW_USEDEFAULT, 470, 590,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
@@ -701,6 +725,7 @@ pub fn run() -> ! {
             set_text(GetDlgItem(hwnd, ID_PWD), &cfg.password);
             set_text(GetDlgItem(hwnd, ID_SERVER), &cfg.server);
             set_text(GetDlgItem(hwnd, ID_INTERVAL), &cfg.check_interval.to_string());
+            set_text(GetDlgItem(hwnd, ID_WIFI), &cfg.wifi_ssid);
             let idx = DOMAINS.iter().position(|d| *d == cfg.domain).unwrap_or(0) as WPARAM;
             SendMessageW(GetDlgItem(hwnd, ID_DOMAIN), CB_SETCURSEL, idx, 0);
             let chk = if crate::autostart::enabled() { BST_CHECKED as WPARAM } else { 0 };

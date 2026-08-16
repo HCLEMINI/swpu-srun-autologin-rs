@@ -17,6 +17,9 @@ pub struct Config {
     pub domain: String,
     #[serde(default = "d_interval")]
     pub check_interval: u64,
+    /// 断网时自动连接的 WiFi SSID(空 = 禁用自动连 WiFi)
+    #[serde(default = "d_wifi_ssid")]
+    pub wifi_ssid: String,
 }
 
 fn d_server() -> String {
@@ -31,6 +34,9 @@ fn d_domain() -> String {
 fn d_interval() -> u64 {
     20
 }
+fn d_wifi_ssid() -> String {
+    "SWPU-EDU".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -41,6 +47,7 @@ impl Default for Config {
             password: String::new(),
             domain: d_domain(),
             check_interval: d_interval(),
+            wifi_ssid: d_wifi_ssid(),
         }
     }
 }

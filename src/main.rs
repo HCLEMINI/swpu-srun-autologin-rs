@@ -9,6 +9,7 @@ mod config;
 mod crypto;
 mod http;
 mod srun;
+mod wifi;
 
 use config::Config;
 use srun::SrunClient;
@@ -85,6 +86,17 @@ fn run_headless() -> ! {
             last_online = Some(on);
         }
         if !on {
+            // 断网先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
+            if !cfg.wifi_ssid.trim().is_empty() {
+                match wifi::ensure(&cfg.wifi_ssid) {
+                    Ok(false) => {
+                        println!("{} 📶 WiFi 已自动连接 {}", ts(), cfg.wifi_ssid);
+                        std::thread::sleep(std::time::Duration::from_secs(3)); // 等关联+DHCP
+                    }
+                    Ok(true) => {}
+                    Err(e) => println!("{} ⚠ WiFi: {}", ts(), e),
+                }
+            }
             match client.login() {
                 Ok(e) if e == "ok" => {
                     println!("{} ✓ 登录成功 ({})", ts(), cfg.domain);
@@ -115,6 +127,28 @@ fn ts() -> String {
         .unwrap_or_default();
     let secs = now.as_secs();
     format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+}
+
+/// WiFi 调试: 无参=显示当前连接; 带参=尝试连接目标 SSID
+fn cmd_wifi(ssid: Option<&str>) -> i32 {
+    match wifi::current_ssid() {
+        Ok(Some(s)) => println!("当前 WiFi: {s}"),
+        Ok(None) => println!("当前未连接任何 WiFi"),
+        Err(e) => println!("✗ {e}"),
+    }
+    match ssid {
+        Some(target) => match wifi::ensure(target) {
+            Ok(_) => {
+                println!("✓ 已连接 {target}");
+                0
+            }
+            Err(e) => {
+                println!("✗ {e}");
+                1
+            }
+        },
+        None => 0,
+    }
 }
 
 /// 加密自检: 用固定测试向量打印 hmd5/info/chksum, 与已验证的 Python/JS 参考值比对
@@ -156,6 +190,8 @@ fn main() {
         std::process::exit(cmd_login());
     } else if args.iter().any(|a| a == "--logout") {
         std::process::exit(cmd_logout());
+    } else if let Some(i) = args.iter().position(|a| a == "--wifi") {
+        std::process::exit(cmd_wifi(args.get(i + 1).map(String::as_str)));
     } else if args.iter().any(|a| a == "--install" || a == "--uninstall") {
         crate::autostart::handle(args.iter().any(|a| a == "--install"));
     } else {

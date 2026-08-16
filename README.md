@@ -16,6 +16,7 @@
 | 🦀 原生实现 | 纯 `std::net` 手写 HTTP（门户为明文 http，零网络依赖）+ `windows-sys` 裸 Win32 GUI/托盘 |
 | 📦 极小体积 | 单 EXE ~310 KB，启动 <50ms，无运行时依赖 |
 | 🔁 自动登录/重连 | 后台周期探活，断连自动重连（失败退避，不刷屏） |
+| 📶 WiFi 自连 | 断网时自动连接 `SWPU-EDU`（可在配置中修改），系统未自动连 WiFi 也能登录 |
 | 📌 系统托盘 | 最小化缩回托盘；关闭按钮真正退出；`--minimized` 静默启动 |
 | ⏯ 开机自启 | 任务计划「用户登录时」触发（`--install`/`--uninstall`，一次 UAC） |
 | 🔒 加密验证 | XXTEA + Srun 自定义 base64 + HMAC-MD5 + SHA1，与官方前端**逐字节交叉验证** |
@@ -27,6 +28,7 @@
 cargo build --release          # 或用 build.bat
 
 # 2) 配置: 复制 config.example.json 为 config.json, 填入学号密码
+#    wifi_ssid: 断网时自动连接的 WiFi 名(留空 = 不自动连 WiFi, 纯有线场景可关闭)
 #    (release\ 目录下运行同理)
 
 # 3) 运行
@@ -35,7 +37,9 @@ srun.exe --minimized    # 静默启动进托盘
 srun.exe --headless     # 无界面服务(后台常驻连网)
 ```
 
-命令行：`--check` 查在线状态 / `--login` 登录 / `--logout` 注销 / `--selftest` 加密自检。
+命令行：`--check` 查在线状态 / `--login` 登录 / `--logout` 注销 / `--selftest` 加密自检 / `--wifi [SSID]` 查询当前 WiFi 或尝试连接指定 WiFi。
+
+> 📶 自动连 WiFi 需系统已保存过目标网络的配置文件（手动连接过一次即可），程序用 Windows 原生 Native Wifi API 连接，无需管理员权限。
 
 ## 线路对照（GUI「线路」下拉）
 
