@@ -2,6 +2,7 @@
 //! Windows 关机/注销/重启前会给所有顶层窗口发 WM_QUERYENDSESSION / WM_ENDSESSION。
 //! GUI 模式直接用主窗口 wndproc 处理, 不走这里。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -13,20 +14,39 @@ fn w(s: &str) -> Vec<u16> {
 }
 
 static HANDLER: OnceLock<Arc<Mutex<Option<Box<dyn Fn() + Send>>>>> = OnceLock::new();
+static DONE: AtomicBool = AtomicBool::new(false);
+
+/// 触发一次回调(异步线程, 只发一次)。
+/// 选在 WM_QUERYENDSESSION 阶段: 此时网络必然还通(网络关闭在关机时序末尾),
+/// 比 WM_ENDSESSION 早最多 5 秒; 若关机被取消, headless 周期检测会自动重新登录, 无副作用
+fn fire_once() {
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(h) = HANDLER.get() {
+        if let Ok(mut g) = h.lock() {
+            if let Some(f) = g.take() {
+                std::thread::spawn(f);
+            }
+        }
+    }
+}
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        // 立即放行关机(不阻塞; 注销动作放到 WM_ENDSESSION 阶段)
-        WM_QUERYENDSESSION => 1,
-        // 系统已决定关机/注销/重启: 执行一次回调(退出登录)
+        // 立即放行关机 + 提前异步注销
+        WM_QUERYENDSESSION => {
+            fire_once();
+            1
+        }
+        // 兜底(正常流程 QUERY 已触发)
         WM_ENDSESSION if wparam != 0 => {
-            if let Some(h) = HANDLER.get() {
-                if let Ok(mut g) = h.lock() {
-                    if let Some(f) = g.take() {
-                        f();
-                    }
-                }
-            }
+            fire_once();
+            0
+        }
+        // wparam==0: 关机被取消 → 复位, 下次关机可再次触发
+        WM_ENDSESSION => {
+            DONE.store(false, Ordering::SeqCst);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

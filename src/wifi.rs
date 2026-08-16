@@ -146,10 +146,10 @@ unsafe fn find_profile(h: HANDLE, guid: &GUID, ssid: &str) -> Result<String, Str
             }
             WlanFreeMemory(list as *const c_void);
         }
-        if !profile.is_empty() || last_err.is_empty() {
+        // 命中立即返回; 未命中继续等扫描完成(扫描通常 2-4s 才可见, 不能提前退出)
+        if !profile.is_empty() {
             return Ok(profile);
         }
-        // 无匹配且上次查询报错 → 继续等扫描完成
     }
     if last_err.is_empty() {
         Ok(String::new()) // 扫描完仍未发现 → 空配置文件名

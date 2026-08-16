@@ -17,6 +17,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    # ShellExecuteExW 被 windows-sys 元数据误标在 Registry feature 下
+    "Win32_System_Registry",
     "Win32_NetworkManagement_WiFi",
     # WlanConnect 被 windows-sys 元数据误标在 Ndis feature 下
     "Win32_NetworkManagement_Ndis",

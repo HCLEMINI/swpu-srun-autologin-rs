@@ -2,7 +2,7 @@
 //! 布局: 状态行[●状态][连接][断开][检测] / 账号 / 密码 / 线路·服务器 / 间隔·自启 / WiFi / 保存 / 日志
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -348,6 +348,29 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
     }
 }
 
+/// 关机/注销时提前退出登录(异步线程, 只发一次)
+static SHUTDOWN_LOGOUT_DONE: AtomicBool = AtomicBool::new(false);
+fn fire_shutdown_logout() {
+    if SHUTDOWN_LOGOUT_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let cfg = SHARED
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| g.cfg.clone());
+    std::thread::spawn(move || {
+        let Some(cfg) = cfg else { return };
+        if cfg.username.is_empty() {
+            return;
+        }
+        push_log("🔌 检测到系统关机/注销, 退出登录中…");
+        match client_from_cfg(&cfg).logout() {
+            Ok(e) => push_log(&format!("已注销 ({})", e)),
+            Err(e) => push_log(&format!("注销失败(网络可能已断开): {}", e)),
+        }
+    });
+}
+
 /// 断网重连前的 WiFi 保障: 未连接目标 SSID 则自动连接(仅当已配置 SSID)
 fn ensure_wifi(cfg: &Config) {
     if cfg.wifi_ssid.trim().is_empty() {
@@ -515,22 +538,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             GetStockObject(WHITE_BRUSH) as LRESULT
         }
         // 关机/注销/重启: 先退出登录, 避免校园网 reject(直接断电会被标记异常, 下次开机拒连 WiFi)
-        WM_QUERYENDSESSION => 1, // 立即放行关机; 注销放到 WM_ENDSESSION 阶段(系统已决定关机, 不等待响应)
+        // 时机: WM_QUERYENDSESSION 阶段网络必然还通(网络关闭在关机时序末尾), 立即放行 + 异步 logout,
+        // 比 WM_ENDSESSION 早最多 5 秒; 即使关机被取消, 周期检测也会自动重新登录, 无副作用
+        WM_QUERYENDSESSION => {
+            fire_shutdown_logout();
+            1
+        }
         WM_ENDSESSION if wparam != 0 => {
-            push_log("🔌 检测到系统关机/注销, 退出登录中…");
-            let cfg = SHARED
-                .get()
-                .and_then(|s| s.lock().ok())
-                .map(|g| g.cfg.clone());
-            if let Some(cfg) = cfg {
-                if !cfg.username.is_empty() {
-                    match client_from_cfg(&cfg).logout() {
-                        Ok(e) => push_log(&format!("已注销 ({})", e)),
-                        Err(e) => push_log(&format!("注销失败(网络可能已断开): {}", e)),
-                    }
-                }
-            }
+            fire_shutdown_logout(); // 兜底(正常流程 QUERY 已触发)
             PostQuitMessage(0);
+            0
+        }
+        // wparam==0: 关机被取消(如其他程序拒绝) → 复位, 使下次关机可再次触发注销
+        WM_ENDSESSION => {
+            SHUTDOWN_LOGOUT_DONE.store(false, Ordering::SeqCst);
             0
         }
         WM_CLOSE => {
