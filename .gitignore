@@ -12,3 +12,7 @@ srun_service.log
 .idea/
 Thumbs.db
 Desktop.ini
+
+# ── 本地备份归档(不属项目) ──
+.git.zip
+.git.zip.fp
