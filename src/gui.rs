@@ -258,7 +258,8 @@ fn push_log(msg: &str) {
     );
     if let Some(s) = SHARED.get() {
         if let Ok(mut g) = s.lock() {
-            g.log_text.push_str(&format!("{}  {}\n", ts, msg));
+            // ⚠ Win32 EDIT 控件只认 \r\n 换行, 单 \n 会显示成方块/不换行
+            g.log_text.push_str(&format!("{}  {}\r\n", ts, msg));
             // 截断: 只保留最近约 6 万字符(约 800 行)
             if g.log_text.len() > 60_000 {
                 let cut = g.log_text.len() - 60_000;
@@ -663,47 +664,53 @@ fn create_controls(hwnd: HWND) {
         let label = WS_CHILD | WS_VISIBLE;
         let edit = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32;
         let btn = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
+        let group = btn | BS_GROUPBOX as u32;
 
-        // 状态行
-        mk("STATIC", "● 检测中…", ID_STATUS, label, 10, 12, 150, 22);
-        mk("BUTTON", "连接", ID_BTN_CONN, btn | BS_PUSHBUTTON as u32, 246, 8, 60, 26);
-        mk("BUTTON", "断开", ID_BTN_DISC, btn | BS_PUSHBUTTON as u32, 311, 8, 60, 26);
-        mk("BUTTON", "立即检测", ID_BTN_CHECK, btn | BS_PUSHBUTTON as u32, 376, 8, 70, 26);
+        // 顶部: 状态 + 操作按钮
+        mk("STATIC", "● 检测中…", ID_STATUS, label, 12, 10, 160, 24);
+        mk("BUTTON", "连接", ID_BTN_CONN, btn | BS_PUSHBUTTON as u32, 246, 6, 60, 28);
+        mk("BUTTON", "断开", ID_BTN_DISC, btn | BS_PUSHBUTTON as u32, 311, 6, 60, 28);
+        mk("BUTTON", "立即检测", ID_BTN_CHECK, btn | BS_PUSHBUTTON as u32, 376, 6, 70, 28);
 
-        // 表单
-        mk("STATIC", "账号", 0, label, 10, 50, 44, 22);
-        mk("EDIT", "", ID_USER, edit, 60, 48, 386, 24);
-        mk("STATIC", "密码", 0, label, 10, 82, 44, 22);
-        mk("EDIT", "", ID_PWD, edit | ES_PASSWORD as u32, 60, 80, 386, 24);
-        mk("STATIC", "线路", 0, label, 10, 114, 44, 22);
+        // 分组 1: 账号与线路(输入框统一 x=64 对齐)
+        mk("BUTTON", "账号与线路", 0, group, 8, 38, 438, 100);
+        mk("STATIC", "账号", 0, label, 16, 60, 42, 22);
+        mk("EDIT", "", ID_USER, edit, 64, 58, 250, 24);
+        mk("STATIC", "密码", 0, label, 16, 92, 42, 22);
+        mk("EDIT", "", ID_PWD, edit | ES_PASSWORD as u32, 64, 90, 250, 24);
+        mk("STATIC", "线路", 0, label, 16, 124, 42, 22);
         let combo = mk(
             "COMBOBOX",
             "",
             ID_DOMAIN,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-            60, 112, 100, 120,
+            64, 122, 110, 120,
         );
         for d in DOMAIN_NAMES {
             SendMessageW(combo, CB_ADDSTRING, 0, w(d).as_ptr() as LPARAM);
         }
         SendMessageW(combo, CB_SETCURSEL, 0, 0);
-        mk("STATIC", "服务器", 0, label, 170, 114, 52, 22);
-        mk("EDIT", "172.16.245.50", ID_SERVER, edit, 226, 112, 220, 24);
-        mk("STATIC", "间隔(秒)", 0, label, 10, 146, 52, 22);
-        mk("EDIT", "20", ID_INTERVAL, edit, 66, 144, 50, 24);
-        mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 130, 148, 160, 20);
-        mk("BUTTON", "保存设置", ID_BTN_SAVE, btn | BS_PUSHBUTTON as u32, 376, 144, 70, 26);
-        mk("STATIC", "WiFi名", 0, label, 10, 176, 52, 22);
-        mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 66, 174, 230, 24);
-        mk("STATIC", "(留空=不自动连WiFi)", 0, label, 302, 178, 140, 20);
+        mk("STATIC", "服务器", 0, label, 186, 124, 42, 22);
+        mk("EDIT", "172.16.245.50", ID_SERVER, edit, 232, 122, 210, 24);
 
-        // 日志
+        // 分组 2: 监控与自启
+        mk("BUTTON", "监控与自启", 0, group, 8, 142, 438, 88);
+        mk("STATIC", "间隔(秒)", 0, label, 16, 164, 52, 22);
+        mk("EDIT", "20", ID_INTERVAL, edit, 74, 162, 50, 24);
+        mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 140, 166, 170, 20);
+        mk("BUTTON", "保存设置", ID_BTN_SAVE, btn | BS_PUSHBUTTON as u32, 376, 162, 70, 26);
+        mk("STATIC", "WiFi名", 0, label, 16, 196, 52, 22);
+        mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 74, 194, 240, 24);
+        mk("STATIC", "(留空=不自动连WiFi)", 0, label, 322, 198, 110, 20);
+
+        // 分组 3: 运行日志
+        mk("BUTTON", "运行日志", 0, group, 8, 234, 438, 330);
         mk(
             "EDIT",
             "",
             ID_LOG,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
-            10, 214, 436, 310,
+            20, 252, 414, 300,
         );
     }
 }
@@ -745,7 +752,7 @@ pub fn run() -> ! {
             class.as_ptr(),
             w("校园网自动登录").as_ptr(),
             WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT, CW_USEDEFAULT, 470, 590,
+            CW_USEDEFAULT, CW_USEDEFAULT, 470, 600,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
