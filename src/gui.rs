@@ -249,13 +249,20 @@ fn client_from_cfg(cfg: &Config) -> SrunClient {
     }
 }
 
+/// 本地时间(时:分:秒)—— 之前用 UTC 时差 8 小时
+fn local_time() -> (u32, u32, u32) {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    unsafe {
+        let mut st: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        (st.wHour as u32, st.wMinute as u32, st.wSecond as u32)
+    }
+}
+
 fn push_log(msg: &str) {
-    let ts = format!(
-        "{:02}:{:02}:{:02}",
-        (now_ms() / 3_600_000) % 24,
-        (now_ms() / 60_000) % 60,
-        (now_ms() / 1000) % 60
-    );
+    let (h, m, s) = local_time();
+    let ts = format!("{:02}:{:02}:{:02}", h, m, s);
     if let Some(s) = SHARED.get() {
         if let Ok(mut g) = s.lock() {
             // ⚠ Win32 EDIT 控件只认 \r\n 换行, 单 \n 会显示成方块/不换行
@@ -672,8 +679,8 @@ fn create_controls(hwnd: HWND) {
         mk("BUTTON", "断开", ID_BTN_DISC, btn | BS_PUSHBUTTON as u32, 311, 6, 60, 28);
         mk("BUTTON", "立即检测", ID_BTN_CHECK, btn | BS_PUSHBUTTON as u32, 376, 6, 70, 28);
 
-        // 分组 1: 账号与线路(输入框统一 x=64 对齐)
-        mk("BUTTON", "账号与线路", 0, group, 8, 38, 438, 100);
+        // 分组 1: 账号与线路(输入框统一 x=64 对齐); 高 116 使线路行(底 146)不溢出
+        mk("BUTTON", "账号与线路", 0, group, 8, 38, 438, 116);
         mk("STATIC", "账号", 0, label, 16, 60, 42, 22);
         mk("EDIT", "", ID_USER, edit, 64, 58, 250, 24);
         mk("STATIC", "密码", 0, label, 16, 92, 42, 22);
@@ -693,8 +700,8 @@ fn create_controls(hwnd: HWND) {
         mk("STATIC", "服务器", 0, label, 186, 124, 42, 22);
         mk("EDIT", "172.16.245.50", ID_SERVER, edit, 232, 122, 210, 24);
 
-        // 分组 2: 监控与自启
-        mk("BUTTON", "监控与自启", 0, group, 8, 142, 438, 88);
+        // 分组 2: 监控与自启(避开分组1 底 154)
+        mk("BUTTON", "监控与自启", 0, group, 8, 158, 438, 88);
         mk("STATIC", "间隔(秒)", 0, label, 16, 164, 52, 22);
         mk("EDIT", "20", ID_INTERVAL, edit, 74, 162, 50, 24);
         mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 140, 166, 170, 20);
@@ -703,14 +710,14 @@ fn create_controls(hwnd: HWND) {
         mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 74, 194, 240, 24);
         mk("STATIC", "(留空=不自动连WiFi)", 0, label, 322, 198, 110, 20);
 
-        // 分组 3: 运行日志
-        mk("BUTTON", "运行日志", 0, group, 8, 234, 438, 330);
+        // 分组 3: 运行日志(避开分组2 底 246)
+        mk("BUTTON", "运行日志", 0, group, 8, 250, 438, 310);
         mk(
             "EDIT",
             "",
             ID_LOG,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
-            20, 252, 414, 300,
+            20, 268, 414, 290,
         );
     }
 }

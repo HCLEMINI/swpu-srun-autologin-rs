@@ -134,11 +134,12 @@ fn run_headless() -> ! {
 }
 
 fn ts() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+    // 本地时间(GetLocalTime), 避免 UTC 时差
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut st) };
+    format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
 }
 
 /// WiFi 调试: 无参=显示当前连接; 带参=尝试连接目标 SSID
