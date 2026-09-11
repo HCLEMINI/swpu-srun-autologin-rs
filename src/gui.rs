@@ -7,9 +7,9 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, GetStockObject, ReleaseDC, SetBitmapBits,
-    SetTextColor, UpdateWindow, WHITE_BRUSH, DEFAULT_GUI_FONT, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
-    DIB_RGB_COLORS,
+    CreateBitmap, CreateDIBSection, CreateFontIndirectW, CreateSolidBrush, DeleteObject, GetDC,
+    GetStockObject, HBRUSH, LOGFONTW, ReleaseDC, SetBitmapBits, SetTextColor, UpdateWindow,
+    WHITE_BRUSH, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
@@ -30,11 +30,11 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 // ------------------------------------------------------------------ //
-//  状态托盘图标: 纯代码生成圆形图标(灰=检测中 / 绿=已连接 / 红=无网络 / 橙=连接中)
+//  状态托盘图标: 纯代码生成圆形图标(灰=检测中 / 绿=已连接 / 红=无网络 / 橙=连接中 / 蓝=其他网络)
 // ------------------------------------------------------------------ //
-const ICON_COLORS: [u32; 4] = [0xFF888888, 0xFF2E8B57, 0xFFC0392B, 0xFFE08A00];
+const ICON_COLORS: [u32; 5] = [0xFF888888, 0xFF2E8B57, 0xFFC0392B, 0xFFE08A00, 0xFF2F6FDE];
 // HICON=*mut c_void 非 Send/Sync, 故存 isize 再转换
-static TRAY_ICONS: OnceLock<[isize; 4]> = OnceLock::new();
+static TRAY_ICONS: OnceLock<[isize; 5]> = OnceLock::new();
 
 fn tray_icon(idx: usize) -> HICON {
     TRAY_ICONS
@@ -48,6 +48,7 @@ fn status_icon_idx(status: Status) -> usize {
         Status::Online => 1,
         Status::Offline => 2,
         Status::Busy => 3,
+        Status::OtherNet => 4,
     }
 }
 
@@ -121,6 +122,7 @@ fn init_tray_icons() {
             make_status_icon(ICON_COLORS[1]),
             make_status_icon(ICON_COLORS[2]),
             make_status_icon(ICON_COLORS[3]),
+            make_status_icon(ICON_COLORS[4]),
         ]
     };
     let _ = TRAY_ICONS.set(icons.map(|h| h as isize));
@@ -147,6 +149,8 @@ pub enum Status {
     Online,
     Offline,
     Busy,
+    /// 其他网络在线(热点/家宽, 非校园网) —— 跳过登录
+    OtherNet,
 }
 
 pub enum Cmd {
@@ -162,6 +166,9 @@ pub struct Shared {
     pub log_dirty: bool,
     pub status: Status,
     pub cfg: Config,
+    /// 用户手动[断开]后暂停自动重连 —— 直到点[连接]/保存设置/检测到已在线才恢复。
+    /// 否则注销后 ~20s 又被自动登录回来, 违背用户意愿
+    pub manual_offline: bool,
 }
 
 static SHARED: OnceLock<Arc<Mutex<Shared>>> = OnceLock::new();
@@ -249,32 +256,40 @@ fn client_from_cfg(cfg: &Config) -> SrunClient {
     }
 }
 
-/// 本地时间(时:分:秒)—— 之前用 UTC 时差 8 小时
-fn local_time() -> (u32, u32, u32) {
+/// 本地时间(年-月-日 时:分:秒)—— 之前用 UTC 有 8 小时时差; 加日期因日志跨天难分辨
+fn local_time() -> String {
     use windows_sys::Win32::Foundation::SYSTEMTIME;
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     unsafe {
         let mut st: SYSTEMTIME = std::mem::zeroed();
         GetLocalTime(&mut st);
-        (st.wHour as u32, st.wMinute as u32, st.wSecond as u32)
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+        )
     }
 }
 
 fn push_log(msg: &str) {
-    let (h, m, s) = local_time();
-    let ts = format!("{:02}:{:02}:{:02}", h, m, s);
+    let line = format!("{}  {}", local_time(), msg);
     if let Some(s) = SHARED.get() {
         if let Ok(mut g) = s.lock() {
             // ⚠ Win32 EDIT 控件只认 \r\n 换行, 单 \n 会显示成方块/不换行
-            g.log_text.push_str(&format!("{}  {}\r\n", ts, msg));
+            g.log_text.push_str(&format!("{}\r\n", line));
             // 截断: 只保留最近约 6 万字符(约 800 行)
             if g.log_text.len() > 60_000 {
-                let cut = g.log_text.len() - 60_000;
+                let mut cut = g.log_text.len() - 60_000;
+                // 截断点必须落在字符边界上, 否则切在 emoji 多字节中间会 panic
+                while cut > 0 && !g.log_text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
                 g.log_text = g.log_text[cut..].to_string();
             }
             g.log_dirty = true;
         }
     }
+    // 同步落盘: 关机注销等事件进程随关机消亡, 只有文件日志事后可查
+    crate::logger::append_line(&line);
 }
 
 fn set_status(s: Status) {
@@ -288,21 +303,35 @@ fn set_status(s: Status) {
 // ------------------------------------------------------------------ //
 //  后台监控线程
 // ------------------------------------------------------------------ //
+/// NetState → 界面状态
+fn status_of(st: srun::NetState) -> Status {
+    match st {
+        srun::NetState::Authenticated => Status::Online,
+        srun::NetState::OtherNet => Status::OtherNet,
+        srun::NetState::NeedLogin | srun::NetState::NoNet => Status::Offline,
+    }
+}
+
 fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
-    let mut last_online: Option<bool> = None;
+    let mut last_state: Option<srun::NetState> = None;
     let mut fail: u64 = 0;
     let mut next_check = 0u128;
     loop {
         // 1) 消费 UI 命令
         match rx.try_recv() {
             Ok(Cmd::Login) => {
-                let cfg = shared.lock().unwrap().cfg.clone();
+                let cfg = {
+                    let mut g = shared.lock().unwrap();
+                    g.manual_offline = false; // 用户显式要求连接 → 解除暂停
+                    g.cfg.clone()
+                };
                 ensure_wifi(&cfg);
                 let _ = do_login(&cfg);
-                let on = srun::is_online();
-                set_status(if on { Status::Online } else { Status::Offline });
-                fail = if on { 0 } else { fail + 1 };
-                last_online = None;
+                // 登录后立即探测刷新状态(不等下一周期)
+                let st = srun::probe(&cfg.server);
+                set_status(status_of(st));
+                fail = if st == srun::NetState::Authenticated { 0 } else { fail + 1 };
+                // 不写 last_state: 让下一周期把「已连接」的恢复过程记进日志
             }
             Ok(Cmd::Logout) => {
                 let cfg = shared.lock().unwrap().cfg.clone();
@@ -311,13 +340,23 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
                     Ok(e) => push_log(&format!("已注销 ({})", e)),
                     Err(e) => push_log(&format!("注销异常: {}", e)),
                 }
-                last_online = None;
+                // 手动断开 = 用户不想联网: 暂停自动重连, 点[连接]或保存设置才恢复
+                shared.lock().unwrap().manual_offline = true;
+                push_log("⏸ 已暂停自动重连(点击[连接]或保存设置恢复)");
+                set_status(Status::Offline);
+                last_state = None;
             }
             Ok(Cmd::Check) => {
-                let on = srun::is_online();
-                set_status(if on { Status::Online } else { Status::Offline });
-                push_log(&format!("当前: {}", if on { "在线" } else { "离线" }));
-                last_online = None;
+                let cfg = shared.lock().unwrap().cfg.clone();
+                let st = srun::probe(&cfg.server);
+                set_status(status_of(st));
+                push_log(match st {
+                    srun::NetState::Authenticated => "当前: 在线(校园网已认证)",
+                    srun::NetState::NeedLogin => "当前: 校园网未认证",
+                    srun::NetState::OtherNet => "当前: 其他网络在线(非校园网)",
+                    srun::NetState::NoNet => "当前: 无网络",
+                });
+                last_state = Some(st);
             }
             Ok(Cmd::Reload) => {
                 let mut g = shared.lock().unwrap();
@@ -326,30 +365,61 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
             Err(mpsc::TryRecvError::Empty) => {}
             Err(_) => break,
         }
-        // 2) 周期断连重连
+        // 2) 周期探测与自动维护
         if now_ms() >= next_check {
-            let iv = {
+            let (iv, cfg, manual) = {
                 let g = shared.lock().unwrap();
-                g.cfg.check_interval.max(5)
+                (g.cfg.check_interval.max(5), g.cfg.clone(), g.manual_offline)
             };
             let backoff = std::cmp::min(180, iv * (fail + 1));
             next_check = now_ms() + backoff as u128 * 1000;
 
-            let on = srun::is_online();
-            if last_online != Some(on) {
-                push_log(if on { "✓ 已连接" } else { "⚠ 检测到断线, 尝试重连…" });
-                last_online = Some(on);
+            let st = srun::probe(&cfg.server);
+            if last_state != Some(st) {
+                push_log(match st {
+                    srun::NetState::Authenticated => "✓ 校园网已连接",
+                    srun::NetState::NeedLogin => "⚠ 在校园网, 尚未认证",
+                    srun::NetState::OtherNet => "ℹ 其他网络已联网, 跳过校园网登录",
+                    srun::NetState::NoNet => "⚠ 无网络连接",
+                });
+                last_state = Some(st);
             }
-            if !on {
-                let cfg = shared.lock().unwrap().cfg.clone();
-                ensure_wifi(&cfg); // 断网时先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
-                let ok = do_login(&cfg);
-                fail = if ok { 0 } else { fail + 1 };
-                let on2 = srun::is_online();
-                set_status(if on2 { Status::Online } else { Status::Offline });
-            } else {
-                set_status(Status::Online);
-                fail = 0;
+            match st {
+                srun::NetState::Authenticated => {
+                    set_status(Status::Online);
+                    fail = 0;
+                    if manual {
+                        shared.lock().unwrap().manual_offline = false;
+                        push_log("检测到已在线(可能浏览器手动登录过), 恢复自动维护");
+                    }
+                }
+                srun::NetState::OtherNet => {
+                    set_status(Status::OtherNet);
+                    fail = 0;
+                }
+                srun::NetState::NeedLogin | srun::NetState::NoNet => {
+                    if manual {
+                        // 用户手动断开后: 只展示状态, 绝不自动登录
+                        set_status(Status::Offline);
+                    } else {
+                        ensure_wifi(&cfg); // 断网先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
+                        // 门户不可达时登录注定失败(get_challenge 连的就是它), 不白发请求
+                        if srun::probe(&cfg.server) == srun::NetState::NeedLogin {
+                            if !do_login(&cfg) {
+                                fail += 1;
+                            }
+                        } else {
+                            fail += 1;
+                        }
+                        // 立即复查刷新状态(不等下一周期)
+                        let st2 = srun::probe(&cfg.server);
+                        set_status(status_of(st2));
+                        if st2 == srun::NetState::Authenticated {
+                            fail = 0;
+                        }
+                        // 不写 last_state: 让下一周期把状态变化记进日志(否则恢复过程静默)
+                    }
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -539,11 +609,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let (r, g, b) = match current_status() {
                     Status::Online => (46, 139, 87),
                     Status::Busy => (224, 138, 0),
+                    Status::OtherNet => (47, 111, 222),
                     Status::Offline => (192, 57, 43),
                 };
                 SetTextColor(wparam as _, rgb(r, g, b));
+                GetStockObject(WHITE_BRUSH) as LRESULT
+            } else if lparam as HWND == GetDlgItem(hwnd, ID_LOG) {
+                // 只读 EDIT 走 CTLCOLORSTATIC: 淡灰底 + 深灰字, 控制台质感
+                SetTextColor(wparam as _, rgb(30, 30, 30));
+                log_brush() as LRESULT
+            } else {
+                GetStockObject(WHITE_BRUSH) as LRESULT
             }
-            GetStockObject(WHITE_BRUSH) as LRESULT
         }
         // 关机/注销/重启: 先退出登录, 避免校园网 reject(直接断电会被标记异常, 下次开机拒连 WiFi)
         // 时机: WM_QUERYENDSESSION 阶段网络必然还通(网络关闭在关机时序末尾), 立即放行 + 异步 logout,
@@ -554,6 +631,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_ENDSESSION if wparam != 0 => {
             fire_shutdown_logout(); // 兜底(正常流程 QUERY 已触发)
+            // 给异步注销线程留完成时间(局域网两跳通常 <100ms)。
+            // 阻塞此处无害——已在关机时序里; 不留宽限则消息循环退出即 process::exit, 可能掐死注销
+            std::thread::sleep(std::time::Duration::from_millis(500));
             PostQuitMessage(0);
             0
         }
@@ -583,11 +663,26 @@ fn current_status() -> Status {
         .unwrap_or(Status::Offline)
 }
 
+fn current_manual() -> bool {
+    SHARED
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| g.manual_offline)
+        .unwrap_or(false)
+}
+
 fn update_status_ui(hwnd: HWND, status: Status) {
     let text = match status {
         Status::Online => "● 已连接",
         Status::Busy => "● 连接中…",
-        Status::Offline => "● 未连接",
+        Status::OtherNet => "● 其他网络在线",
+        Status::Offline => {
+            if current_manual() {
+                "● 已手动断开"
+            } else {
+                "● 未连接"
+            }
+        }
     };
     let st = unsafe { GetDlgItem(hwnd, ID_STATUS) };
     if !st.is_null() {
@@ -637,10 +732,17 @@ fn save_settings(hwnd: HWND) {
             wifi_ssid,
         };
         let _ = config::save(&cfg);
+        let mut was_manual = false;
         if let Some(s) = SHARED.get() {
             if let Ok(mut g) = s.lock() {
                 g.cfg = cfg;
+                was_manual = g.manual_offline;
+                // 保存设置 = 用户要它正常工作, 解除手动暂停
+                g.manual_offline = false;
             }
+        }
+        if was_manual {
+            push_log("已恢复自动重连");
         }
         // 开机自启复选框
         let chk = SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTO), BM_GETCHECK, 0, 0);
@@ -650,9 +752,29 @@ fn save_settings(hwnd: HWND) {
     }
 }
 
+/// 按名创建逻辑字体(启动时一次, 进程退出时由系统回收)
+unsafe fn make_font(face: &str, height: i32, bold: bool) -> WPARAM {
+    let mut lf: LOGFONTW = std::mem::zeroed();
+    lf.lfHeight = height;
+    lf.lfWeight = if bold { 700 } else { 400 }; // FW_BOLD / FW_NORMAL
+    lf.lfCharSet = 1; // DEFAULT_CHARSET
+    lf.lfQuality = 5; // CLEARTYPE_QUALITY
+    let f: Vec<u16> = face.encode_utf16().collect();
+    lf.lfFaceName[..f.len()].copy_from_slice(&f);
+    CreateFontIndirectW(&lf) as WPARAM
+}
+
+/// 日志底色画刷(创建一次, 每帧返回句柄零成本)
+static LOG_BRUSH: OnceLock<isize> = OnceLock::new();
+fn log_brush() -> HBRUSH {
+    *LOG_BRUSH.get_or_init(|| unsafe { CreateSolidBrush(rgb(246, 246, 248)) } as isize) as HBRUSH
+}
+
 fn create_controls(hwnd: HWND) {
     unsafe {
-        let font = GetStockObject(DEFAULT_GUI_FONT) as WPARAM;
+        let font = make_font("Segoe UI", -12, false); // 全局面 9pt
+        let font_bold = make_font("Segoe UI", -12, true); // 状态/分组标题加粗
+        let font_mono = make_font("Consolas", -13, false); // 日志等宽
         let mk = |class: &str, text: &str, id: i32, style: u32, x: i32, y: i32, ww: i32, hh: i32| {
             let h = CreateWindowExW(
                 0,
@@ -674,51 +796,56 @@ fn create_controls(hwnd: HWND) {
         let group = btn | BS_GROUPBOX as u32;
 
         // 顶部: 状态 + 操作按钮
-        mk("STATIC", "● 检测中…", ID_STATUS, label, 12, 10, 160, 24);
+        let st = mk("STATIC", "● 检测中…", ID_STATUS, label, 12, 10, 170, 24);
+        SendMessageW(st, WM_SETFONT, font_bold, 1);
         mk("BUTTON", "连接", ID_BTN_CONN, btn | BS_PUSHBUTTON as u32, 246, 6, 60, 28);
         mk("BUTTON", "断开", ID_BTN_DISC, btn | BS_PUSHBUTTON as u32, 311, 6, 60, 28);
         mk("BUTTON", "立即检测", ID_BTN_CHECK, btn | BS_PUSHBUTTON as u32, 376, 6, 70, 28);
 
-        // 分组 1: 账号与线路(输入框统一 x=64 对齐); 高 116 使线路行(底 146)不溢出
-        mk("BUTTON", "账号与线路", 0, group, 8, 38, 438, 116);
-        mk("STATIC", "账号", 0, label, 16, 60, 42, 22);
-        mk("EDIT", "", ID_USER, edit, 64, 58, 250, 24);
-        mk("STATIC", "密码", 0, label, 16, 92, 42, 22);
-        mk("EDIT", "", ID_PWD, edit | ES_PASSWORD as u32, 64, 90, 250, 24);
-        mk("STATIC", "线路", 0, label, 16, 124, 42, 22);
+        // 分组 1: 账号与线路 —— 标题带占 y38~56, 内容自 y=60 起; 标签/输入统一 x=16/78 网格
+        let g1 = mk("BUTTON", "账号与线路", 0, group, 8, 38, 438, 116);
+        SendMessageW(g1, WM_SETFONT, font_bold, 1);
+        mk("STATIC", "账号", 0, label, 16, 62, 56, 22);
+        mk("EDIT", "", ID_USER, edit, 78, 60, 236, 24);
+        mk("STATIC", "密码", 0, label, 16, 92, 56, 22);
+        mk("EDIT", "", ID_PWD, edit | ES_PASSWORD as u32, 78, 90, 236, 24);
+        mk("STATIC", "线路", 0, label, 16, 124, 56, 22);
         let combo = mk(
             "COMBOBOX",
             "",
             ID_DOMAIN,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-            64, 122, 110, 120,
+            78, 122, 110, 130,
         );
         for d in DOMAIN_NAMES {
             SendMessageW(combo, CB_ADDSTRING, 0, w(d).as_ptr() as LPARAM);
         }
         SendMessageW(combo, CB_SETCURSEL, 0, 0);
-        mk("STATIC", "服务器", 0, label, 186, 124, 42, 22);
-        mk("EDIT", "172.16.245.50", ID_SERVER, edit, 232, 122, 210, 24);
+        mk("STATIC", "服务器", 0, label, 196, 124, 46, 22);
+        mk("EDIT", "172.16.245.50", ID_SERVER, edit, 246, 122, 196, 24);
 
-        // 分组 2: 监控与自启(避开分组1 底 154)
-        mk("BUTTON", "监控与自启", 0, group, 8, 158, 438, 88);
-        mk("STATIC", "间隔(秒)", 0, label, 16, 164, 52, 22);
-        mk("EDIT", "20", ID_INTERVAL, edit, 74, 162, 50, 24);
-        mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 140, 166, 170, 20);
-        mk("BUTTON", "保存设置", ID_BTN_SAVE, btn | BS_PUSHBUTTON as u32, 376, 162, 70, 26);
-        mk("STATIC", "WiFi名", 0, label, 16, 196, 52, 22);
-        mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 74, 194, 240, 24);
-        mk("STATIC", "(留空=不自动连WiFi)", 0, label, 322, 198, 110, 20);
+        // 分组 2: 监控与自启 —— 标题带占 y160~178, 内容自 y=182 起(修复与「间隔(秒)」重叠)
+        let g2 = mk("BUTTON", "监控与自启", 0, group, 8, 160, 438, 92);
+        SendMessageW(g2, WM_SETFONT, font_bold, 1);
+        mk("STATIC", "间隔(秒)", 0, label, 16, 184, 56, 22);
+        mk("EDIT", "20", ID_INTERVAL, edit, 78, 182, 52, 24);
+        mk("BUTTON", "开机自启(登录时)", ID_CHK_AUTO, btn | BS_AUTOCHECKBOX as u32, 146, 184, 164, 22);
+        mk("BUTTON", "保存设置", ID_BTN_SAVE, btn | BS_PUSHBUTTON as u32, 368, 182, 74, 26);
+        mk("STATIC", "WiFi名", 0, label, 16, 214, 56, 22);
+        mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 78, 212, 236, 24);
+        mk("STATIC", "(留空=不自动连WiFi)", 0, label, 322, 216, 118, 20);
 
-        // 分组 3: 运行日志(避开分组2 底 246)
-        mk("BUTTON", "运行日志", 0, group, 8, 250, 438, 310);
-        mk(
+        // 分组 3: 运行日志(等宽字体, 配淡灰底)
+        let g3 = mk("BUTTON", "运行日志", 0, group, 8, 258, 438, 302);
+        SendMessageW(g3, WM_SETFONT, font_bold, 1);
+        let log = mk(
             "EDIT",
             "",
             ID_LOG,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
-            20, 268, 414, 290,
+            20, 280, 414, 270,
         );
+        SendMessageW(log, WM_SETFONT, font_mono, 1);
     }
 }
 
@@ -732,8 +859,10 @@ pub fn run() -> ! {
         log_dirty: false,
         status: Status::Offline,
         cfg,
+        manual_offline: false,
     }));
     let _ = SHARED.set(shared.clone());
+    push_log("程序已启动, 后台监控运行中");
 
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());

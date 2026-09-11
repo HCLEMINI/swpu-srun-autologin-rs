@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SWPU 校园网自动登录 · 宣传海报</title>
+<style>
+  :root {
+    --bg0: #0a1628;
+    --bg1: #10223d;
+    --card: rgba(255,255,255,.045);
+    --card-bd: rgba(120,180,255,.14);
+    --cyan: #35e0c8;
+    --green: #2ee87f;
+    --blue: #4da6ff;
+    --orange: #ffa94d;
+    --red: #ff6b6b;
+    --text: #e8f1ff;
+    --dim: #8fa8c8;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    min-height:100vh;
+    background:
+      radial-gradient(1100px 500px at 85% -10%, rgba(53,224,200,.16), transparent 60%),
+      radial-gradient(900px 480px at -10% 25%, rgba(77,166,255,.14), transparent 60%),
+      linear-gradient(160deg, var(--bg0), var(--bg1) 55%, #0b1830);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "Segoe UI", "PingFang SC", sans-serif;
+    display:flex; justify-content:center; padding: 40px 16px;
+  }
+  .poster {
+    width: 780px; max-width: 100%;
+    background: linear-gradient(170deg, rgba(255,255,255,.05), rgba(255,255,255,.015));
+    border: 1px solid var(--card-bd);
+    border-radius: 24px;
+    padding: 44px 46px 30px;
+    position: relative;
+    overflow: hidden;
+  }
+  .poster::before {
+    content:""; position:absolute; inset:0;
+    background:
+      linear-gradient(90deg, rgba(120,180,255,.05) 1px, transparent 1px),
+      linear-gradient(rgba(120,180,255,.05) 1px, transparent 1px);
+    background-size: 34px 34px;
+    pointer-events:none;
+  }
+  .top { display:flex; align-items:center; gap:14px; margin-bottom:6px; position:relative; }
+  .logo {
+    width:56px; height:56px; border-radius:16px; flex-shrink:0;
+    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    display:flex; align-items:center; justify-content:center;
+    box-shadow: 0 8px 24px rgba(53,224,200,.35);
+  }
+  .logo svg { width:32px; height:32px; }
+  .brand { font-size:15px; color:var(--dim); letter-spacing:2px; }
+  h1 { font-size:42px; font-weight:800; letter-spacing:1px;
+    background: linear-gradient(92deg, #fff, var(--cyan) 60%, var(--blue));
+    -webkit-background-clip: text; background-clip: text; color:transparent; }
+  .sub { color:var(--dim); font-size:15px; margin:4px 0 26px; position:relative; }
+  .sub b { color:var(--cyan); font-weight:600; }
+
+  /* 托盘状态演示条 */
+  .statusbar {
+    display:flex; align-items:center; gap:18px;
+    background: rgba(10,22,40,.65);
+    border:1px solid var(--card-bd); border-radius:14px;
+    padding:14px 20px; margin-bottom:26px; position:relative;
+    flex-wrap: wrap;
+  }
+  .tray-demo { display:flex; align-items:center; gap:10px; }
+  .tray-ico { width:26px; height:26px; border-radius:50%; position:relative; box-shadow: 0 0 12px currentColor; }
+  .tray-ico.gray  { background:#8a9bb0; color:#8a9bb0; }
+  .tray-ico.green { background:var(--green); color:var(--green); animation: pulse 2.4s infinite; }
+  .tray-ico.red   { background:var(--red); color:var(--red); }
+  .tray-ico.orange{ background:var(--orange); color:var(--orange); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+  .tray-label { font-size:12px; color:var(--dim); }
+  .tray-label span { display:block; font-size:14px; color:var(--text); font-weight:600; }
+  .status-text { flex:1; min-width:200px; font-size:13.5px; color:var(--dim); line-height:1.7; }
+  .status-text b { color:var(--green); }
+
+  /* 特性网格 */
+  .grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px; margin-bottom:26px; position:relative; }
+  .card {
+    background:var(--card); border:1px solid var(--card-bd);
+    border-radius:16px; padding:18px 16px 16px;
+    transition: transform .2s, border-color .2s;
+  }
+  .card:hover { transform: translateY(-3px); border-color: rgba(53,224,200,.45); }
+  .card .ico { width:40px; height:40px; border-radius:11px; display:flex; align-items:center; justify-content:center; margin-bottom:12px; }
+  .card .ico svg { width:22px; height:22px; }
+  .card h3 { font-size:16px; font-weight:700; margin-bottom:6px; }
+  .card p { font-size:12.5px; color:var(--dim); line-height:1.65; }
+  .c-cyan   { background:rgba(53,224,200,.12); }
+  .c-blue   { background:rgba(77,166,255,.12); }
+  .c-green  { background:rgba(46,232,127,.12); }
+  .c-orange { background:rgba(255,169,77,.12); }
+  .c-red    { background:rgba(255,107,107,.12); }
+  .c-white  { background:rgba(255,255,255,.1); }
+
+  /* 亮点数字 */
+  .stats { display:flex; gap:14px; margin-bottom:26px; position:relative; }
+  .stat {
+    flex:1; text-align:center; padding:16px 8px;
+    background: linear-gradient(160deg, rgba(53,224,200,.1), rgba(77,166,255,.05));
+    border:1px solid rgba(53,224,200,.22); border-radius:14px;
+  }
+  .stat .num { font-size:34px; font-weight:800; color:var(--cyan); letter-spacing:1px; }
+  .stat .lbl { font-size:12px; color:var(--dim); margin-top:4px; }
+
+  /* 线路行 */
+  .lines {
+    display:flex; gap:10px; flex-wrap:wrap; margin-bottom:24px; position:relative;
+    justify-content:center;
+  }
+  .line {
+    font-size:13px; padding:8px 16px; border-radius:999px;
+    border:1px solid rgba(120,180,255,.25); color:var(--dim);
+    background: rgba(120,180,255,.06);
+  }
+  .line b { color:var(--text); }
+
+  .footer { text-align:center; position:relative; }
+  .gh {
+    display:inline-flex; align-items:center; gap:10px;
+    color:#fff; text-decoration:none; font-size:14.5px; font-weight:600;
+    padding:12px 26px; border-radius:12px;
+    background: linear-gradient(135deg, rgba(53,224,200,.85), rgba(77,166,255,.85));
+    box-shadow: 0 8px 24px rgba(53,224,200,.3);
+  }
+  .gh svg { width:20px; height:20px; }
+  .tag { font-size:11.5px; color:var(--dim); margin-top:14px; line-height:1.8; }
+  .tag a { color:var(--cyan); text-decoration:none; }
+
+  @media (max-width: 640px) {
+    .grid { grid-template-columns:repeat(2, 1fr); }
+    h1 { font-size:32px; }
+    .poster { padding: 30px 20px 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="poster">
+
+  <!-- 标题 -->
+  <div class="top">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#0a1628" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/>
+      </svg>
+    </div>
+    <div>
+      <div class="brand">SWPU · 西南石油大学</div>
+      <h1>校园网自动登录</h1>
+    </div>
+  </div>
+  <div class="sub">Rust 原生客户端 · 解决官方客户端有线连接 <b>「秒连秒断」</b> · 开源 MIT 协议</div>
+
+  <!-- 托盘状态演示 -->
+  <div class="statusbar">
+    <div class="tray-demo">
+      <div class="tray-ico gray"></div>
+      <div class="tray-label"><span>检测中</span>灰</div>
+    </div>
+    <div class="tray-demo">
+      <div class="tray-ico green"></div>
+      <div class="tray-label"><span>已连接</span>绿</div>
+    </div>
+    <div class="tray-demo">
+      <div class="tray-ico orange"></div>
+      <div class="tray-label"><span>连接中</span>橙</div>
+    </div>
+    <div class="tray-demo">
+      <div class="tray-ico red"></div>
+      <div class="tray-label"><span>无网络</span>红</div>
+    </div>
+    <div class="status-text">托盘图标<b>实时变色</b>，网络状态一眼可见；断线自动重连，无需打开窗口</div>
+  </div>
+
+  <!-- 特性 -->
+  <div class="grid">
+    <div class="card">
+      <div class="ico c-cyan"><svg viewBox="0 0 24 24" fill="none" stroke="#35e0c8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+      <h3>自动登录 · 断线重连</h3>
+      <p>后台周期探活，断网即自动重连（失败自动退避，不刷屏）；开机自启，登录时静默进托盘</p>
+    </div>
+    <div class="card">
+      <div class="ico c-blue"><svg viewBox="0 0 24 24" fill="none" stroke="#4da6ff" stroke-width="2" stroke-linecap="round"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 15.5a5.5 5.5 0 0 1 7 0M12 18.5h.01"/></svg></div>
+      <h3>WiFi 自动连接</h3>
+      <p>断网时自动连接 SWPU-EDU（可在配置中修改），系统没自动连 WiFi 也能正常登录</p>
+    </div>
+    <div class="card">
+      <div class="ico c-green"><svg viewBox="0 0 24 24" fill="none" stroke="#2ee87f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.5 6.5a8 8 0 0 0-13 0M15.5 9.5a4 4 0 0 0-7 0M12 12.5v4"/></svg></div>
+      <h3>关机前自动注销</h3>
+      <p>检测到关机/注销/重启，先向校园网退出登录，避免直接断电触发 reject、下次开机被拒连 WiFi</p>
+    </div>
+    <div class="card">
+      <div class="ico c-orange"><svg viewBox="0 0 24 24" fill="none" stroke="#ffa94d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+      <h3>极小 · 秒开</h3>
+      <p>单文件仅 <b>310 KB</b>，启动 &lt;50ms，零依赖零安装；比旧版 Python 客户端缩小 <b>47 倍</b></p>
+    </div>
+    <div class="card">
+      <div class="ico c-red"><svg viewBox="0 0 24 24" fill="none" stroke="#ff6b6b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>
+      <h3>加密与官方一致</h3>
+      <p>XXTEA + 自定义 Base64 + HMAC-MD5 + SHA1，与官方前端逐字节交叉验证；仅执行等价认证请求，不绕过计费</p>
+    </div>
+    <div class="card">
+      <div class="ico c-white"><svg viewBox="0 0 24 24" fill="none" stroke="#e8f1ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16M6 20V9l6-5 6 5v11M10 20v-6h4v6"/></svg></div>
+      <h3>多线路支持</h3>
+      <p>移动无线 / 移动有线 / 电信 / 学生 / 教师，一键切换；插网线连「移动有线」= 真正的有线网络</p>
+    </div>
+  </div>
+
+  <!-- 亮点 -->
+  <div class="stats">
+    <div class="stat"><div class="num">310KB</div><div class="lbl">单文件 EXE</div></div>
+    <div class="stat"><div class="num">47×</div><div class="lbl">体积小于旧版</div></div>
+    <div class="stat"><div class="num">&lt;50ms</div><div class="lbl">启动速度</div></div>
+    <div class="stat"><div class="num">5</div><div class="lbl">条线路可选</div></div>
+  </div>
+
+  <!-- 线路 -->
+  <div class="lines">
+    <div class="line">移动无线 <b>@yd</b></div>
+    <div class="line">移动有线 <b>@ydyx</b></div>
+    <div class="line">电信 <b>@dxwx</b></div>
+    <div class="line">学生 <b>@stu</b></div>
+    <div class="line">教师 <b>@tch</b></div>
+  </div>
+
+  <!-- 底部 -->
+  <div class="footer">
+    <a class="gh" href="https://github.com/HCLEMINI/swpu-srun-autologin-rs" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      github.com/HCLEMINI/swpu-srun-autologin-rs
+    </a>
+    <div class="tag">Rust 原生 · 零依赖 · MIT 开源<br>仅供在校学生个人学习与日常联网使用 · 程序仅执行与浏览器等价的认证请求，不绕过计费</div>
+  </div>
+
+</div>
+</body>
+</html>

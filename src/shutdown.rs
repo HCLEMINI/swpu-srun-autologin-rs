@@ -42,6 +42,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // 兜底(正常流程 QUERY 已触发)
         WM_ENDSESSION if wparam != 0 => {
             fire_once();
+            // 给异步注销线程留完成时间; 不留宽限则消息循环退出、线程随进程被杀
+            std::thread::sleep(std::time::Duration::from_millis(500));
             0
         }
         // wparam==0: 关机被取消 → 复位, 下次关机可再次触发

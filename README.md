@@ -21,6 +21,8 @@
 | 📌 系统托盘 | 最小化缩回托盘；关闭按钮真正退出；`--minimized` 静默启动 |
 | ⏯ 开机自启 | 注册表 Run 键「登录时」启动（`--install`/`--uninstall`，免提权免弹窗） |
 | 🔒 加密验证 | XXTEA + Srun 自定义 base64 + HMAC-MD5 + SHA1，与官方前端**逐字节交叉验证** |
+| 🧠 四态探测 | 门户可达性 × NCSI 联合判定(已认证/未认证/其他网络/无网)；连了热点/家宽等**其他网络时跳过校园网登录**；手动[断开]后**暂停自动重连**，点[连接]或保存设置才恢复 |
+| 📝 落盘日志 | 运行日志写入 EXE 同目录 `srun_service.log`，关机注销结果事后可查 |
 
 ## 快速开始
 
@@ -38,7 +40,7 @@ srun.exe --minimized    # 静默启动进托盘
 srun.exe --headless     # 无界面服务(后台常驻连网)
 ```
 
-命令行：`--check` 查在线状态 / `--login` 登录 / `--logout` 注销 / `--selftest` 加密自检 / `--wifi [SSID]` 查询当前 WiFi 或尝试连接指定 WiFi。
+命令行：`--check` 查网络状态(校园网已认证/未认证/其他网络/无网) / `--login` 登录 / `--logout` 注销 / `--selftest` 加密自检 / `--wifi [SSID]` 查询当前 WiFi 或尝试连接指定 WiFi。
 
 > 📶 自动连 WiFi 需系统已保存过目标网络的配置文件（手动连接过一次即可），程序用 Windows 原生 Native Wifi API 连接，无需管理员权限。
 
@@ -54,7 +56,7 @@ srun.exe --headless     # 无界面服务(后台常驻连网)
 ## 目录结构
 
 ```
-├── src/            # main/crypto/http/srun/config/gui/autostart
+├── src/            # main/crypto/http/srun/config/gui/wifi/shutdown/autostart/logger
 ├── release/        # 成品 srun.exe(运行时需同目录 config.json)
 ├── build.bat       # 一键构建
 ├── config.example.json

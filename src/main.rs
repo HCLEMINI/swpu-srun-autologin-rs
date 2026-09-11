@@ -25,9 +25,19 @@ fn client_from(cfg: &Config) -> SrunClient {
 }
 
 fn cmd_check() -> i32 {
-    let on = srun::is_online();
-    println!("{}", if on { "在线" } else { "离线" });
-    if on { 0 } else { 1 }
+    let cfg = config::load();
+    let st = srun::probe(&cfg.server);
+    let msg = match st {
+        srun::NetState::Authenticated => "在线(校园网已认证)",
+        srun::NetState::NeedLogin => "离线(在校园网, 尚未认证)",
+        srun::NetState::OtherNet => "在线(其他网络, 非校园网)",
+        srun::NetState::NoNet => "离线(无网络)",
+    };
+    println!("{}", msg);
+    match st {
+        srun::NetState::Authenticated | srun::NetState::OtherNet => 0,
+        _ => 1,
+    }
 }
 
 fn cmd_login() -> i32 {
@@ -68,9 +78,17 @@ fn cmd_logout() -> i32 {
     }
 }
 
-/// 无界面服务模式: 周期探活, 断连自动重连(与 Python 版 --headless 相同行为)
+/// headless 日志: 控制台 + 文件双写。
+/// GUI 子系统下无控制台时 println 静默失败, 文件才是权威记录
+fn hlog(msg: &str) {
+    let line = format!("{}  {}", ts(), msg);
+    println!("{}", line);
+    crate::logger::append_line(&line);
+}
+
+/// 无界面服务模式: 周期探测(四态), 断连自动重连(与 Python 版 --headless 相同行为)
 fn run_headless() -> ! {
-    println!("[headless] 服务模式启动");
+    hlog("[headless] 服务模式启动");
     let cfg = config::load();
     if cfg.username.is_empty() || cfg.password.is_empty() {
         eprintln!("[headless] config.json 未配置账号/密码, 退出");
@@ -85,47 +103,57 @@ fn run_headless() -> ! {
         }
         let client = client_from(&cfg);
         match client.logout() {
-            Ok(e) => println!("{} 🔌 系统关机/注销, 已退出登录 ({})", ts(), e),
-            Err(e) => println!("{} 🔌 关机注销失败(网络可能已断开): {}", ts(), e),
+            Ok(e) => hlog(&format!("🔌 系统关机/注销, 已退出登录 ({})", e)),
+            Err(e) => hlog(&format!("🔌 关机注销失败(网络可能已断开): {}", e)),
         }
     });
-    let mut last_online: Option<bool> = None;
+    let mut last_state: Option<srun::NetState> = None;
     let mut fail = 0u32;
     loop {
-        let on = srun::is_online();
-        if last_online != Some(on) {
-            println!("{} 状态: {}", ts(), if on { "已连接" } else { "断开, 尝试重连…" });
-            last_online = Some(on);
+        let st = srun::probe(&cfg.server);
+        if last_state != Some(st) {
+            hlog(match st {
+                srun::NetState::Authenticated => "状态: 校园网已连接",
+                srun::NetState::NeedLogin => "状态: 校园网未认证, 尝试登录…",
+                srun::NetState::OtherNet => "状态: 其他网络已联网, 跳过校园网登录",
+                srun::NetState::NoNet => "状态: 无网络",
+            });
+            last_state = Some(st);
         }
-        if !on {
-            // 断网先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
-            if !cfg.wifi_ssid.trim().is_empty() {
-                match wifi::ensure(&cfg.wifi_ssid) {
-                    Ok(false) => {
-                        println!("{} 📶 WiFi 已自动连接 {}", ts(), cfg.wifi_ssid);
-                        std::thread::sleep(std::time::Duration::from_secs(3)); // 等关联+DHCP
+        match st {
+            srun::NetState::Authenticated | srun::NetState::OtherNet => fail = 0,
+            srun::NetState::NeedLogin | srun::NetState::NoNet => {
+                // 断网先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
+                if !cfg.wifi_ssid.trim().is_empty() {
+                    match wifi::ensure(&cfg.wifi_ssid) {
+                        Ok(false) => {
+                            hlog(&format!("📶 WiFi 已自动连接 {}", cfg.wifi_ssid));
+                            std::thread::sleep(std::time::Duration::from_secs(3)); // 等关联+DHCP
+                        }
+                        Ok(true) => {}
+                        Err(e) => hlog(&format!("⚠ WiFi: {}", e)),
                     }
-                    Ok(true) => {}
-                    Err(e) => println!("{} ⚠ WiFi: {}", ts(), e),
                 }
-            }
-            match client.login() {
-                Ok(e) if e == "ok" => {
-                    println!("{} ✓ 登录成功 ({})", ts(), cfg.domain);
-                    fail = 0;
-                    last_online = Some(true);
-                }
-                Ok(e) => {
-                    println!("{} ✗ 登录失败: {}", ts(), e);
+                // 门户不可达时登录注定失败(get_challenge 连的就是它), 不白发请求
+                if srun::probe(&cfg.server) == srun::NetState::NeedLogin {
+                    match client.login() {
+                        Ok(e) if e == "ok" => {
+                            hlog(&format!("✓ 登录成功 ({})", cfg.domain));
+                            fail = 0;
+                        }
+                        Ok(e) => {
+                            hlog(&format!("✗ 登录失败: {}", e));
+                            fail += 1;
+                        }
+                        Err(e) => {
+                            hlog(&format!("✗ 登录异常: {}", e));
+                            fail += 1;
+                        }
+                    }
+                } else {
                     fail += 1;
                 }
-                Err(e) => {
-                    println!("{} ✗ 登录异常: {}", ts(), e);
-                    fail += 1;
-                }
             }
-        } else {
-            fail = 0;
         }
         // 退避: 连续失败时逐步拉长
         let iv = std::cmp::min(180u64, cfg.check_interval.max(5) * (fail as u64 + 1));
@@ -134,12 +162,15 @@ fn run_headless() -> ! {
 }
 
 fn ts() -> String {
-    // 本地时间(GetLocalTime), 避免 UTC 时差
+    // 本地时间(GetLocalTime), 避免 UTC 时差; 带日期: 日志跨天可分辨
     use windows_sys::Win32::Foundation::SYSTEMTIME;
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut st) };
-    format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+    )
 }
 
 /// WiFi 调试: 无参=显示当前连接; 带参=尝试连接目标 SSID
@@ -215,4 +246,5 @@ fn main() {
 
 mod autostart;
 mod gui;
+mod logger;
 mod shutdown;

@@ -158,3 +158,32 @@ pub fn is_online() -> bool {
         Err(_) => false,
     }
 }
+
+/// 网络四态: 「门户可达(在不在校园网) × NCSI(有没有互联网)」联合判定
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NetState {
+    /// 校园网且已认证
+    Authenticated,
+    /// 在校园网但未认证(该登录)
+    NeedLogin,
+    /// 不在校园网但已有互联网(热点/家宽) —— 跳过登录, 不必连校园网
+    OtherNet,
+    /// 完全无网络
+    NoNet,
+}
+
+/// 门户可达性 = 是否身处校园网。
+/// 服务器是 172.16.x.x 私网地址, 出了校园就不可路由 —— 有线无线通吃, 比 SSID 判定可靠
+pub fn portal_reachable(server: &str) -> bool {
+    http_get(server, 80, "/", 2000).is_ok()
+}
+
+/// 一次完整探测(门户 + NCSI 两个独立请求, 各自带超时)
+pub fn probe(server: &str) -> NetState {
+    match (portal_reachable(server), is_online()) {
+        (true, true) => NetState::Authenticated,
+        (true, false) => NetState::NeedLogin,
+        (false, true) => NetState::OtherNet,
+        (false, false) => NetState::NoNet,
+    }
+}

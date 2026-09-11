@@ -2,13 +2,21 @@
 //! 校园门户与 NCSI 探测均为明文 http, 无需 TLS, 故不引入任何 HTTP 库。
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 /// 发起 GET 请求, 返回响应体(截掉 HTTP 头)。
 /// host: 域名或 IP; port: 端口; path_query: 如 "/cgi-bin/srun_portal?action=login&..."
 pub fn http_get(host: &str, port: u16, path_query: &str, timeout_ms: u64) -> Result<String, String> {
-    let mut stream = TcpStream::connect((host, port)).map_err(|e| format!("连接 {} 失败: {}", host, e))?;
+    // 先解析再连: connect_timeout 需要具体地址; 且连接阶段独立短超时 ——
+    // 门户是私网地址, 在非校园网下不可路由, 走系统 TCP 超时要 ~21s, 会卡死整个探测周期
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("解析 {} 失败: {}", host, e))?
+        .next()
+        .ok_or_else(|| format!("解析 {} 无结果", host))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms.min(2500)))
+        .map_err(|e| format!("连接 {} 失败: {}", host, e))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
         .ok();
