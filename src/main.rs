@@ -95,6 +95,10 @@ fn run_headless() -> ! {
         std::process::exit(1);
     }
     let client = client_from(&cfg);
+    // 进程守护: 服务模式更需无人值守, 异常退出(崩溃/被杀)自动重启
+    if cfg.guard && !crate::guard::is_watched() {
+        crate::guard::spawn(true);
+    }
     // 关机/注销/重启前先退出登录(校园网直接断电会触发 reject, 下次开机被拒连 WiFi)
     crate::shutdown::watch(|| {
         let cfg = config::load();
@@ -224,6 +228,14 @@ fn cmd_selftest() {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // 看门狗模式: srun --watchdog <pid> [--headless] —— 守护指定进程, 异常退出自动重启
+    if let Some(i) = args.iter().position(|a| a == "--watchdog") {
+        let pid: u32 = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        if pid > 0 {
+            crate::guard::run_watchdog(pid, args.iter().any(|a| a == "--headless"));
+        }
+        std::process::exit(0);
+    }
     if args.iter().any(|a| a == "--selftest") {
         cmd_selftest();
     } else if args.iter().any(|a| a == "--headless") {
@@ -245,6 +257,7 @@ fn main() {
 }
 
 mod autostart;
+mod guard;
 mod gui;
 mod logger;
 mod shutdown;

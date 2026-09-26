@@ -206,6 +206,7 @@ const ID_BTN_SAVE: i32 = 109;
 const ID_LOG: i32 = 110;
 const ID_CHK_AUTO: i32 = 111;
 const ID_WIFI: i32 = 112;
+const ID_CHK_GUARD: i32 = 113;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_TIMER_POLL: usize = 1;
@@ -270,7 +271,7 @@ fn local_time() -> String {
     }
 }
 
-fn push_log(msg: &str) {
+pub(crate) fn push_log(msg: &str) {
     let line = format!("{}  {}", local_time(), msg);
     if let Some(s) = SHARED.get() {
         if let Ok(mut g) = s.lock() {
@@ -722,6 +723,7 @@ fn save_settings(hwnd: HWND) {
             .unwrap_or("@yd")
             .to_string();
         let wifi_ssid = get_text(GetDlgItem(hwnd, ID_WIFI)).trim().to_string();
+        let guard = SendMessageW(GetDlgItem(hwnd, ID_CHK_GUARD), BM_GETCHECK, 0, 0) as u32 == BST_CHECKED;
         let cfg = Config {
             server: if server.is_empty() { "172.16.245.50".into() } else { server },
             ac_id: "1".into(),
@@ -730,6 +732,7 @@ fn save_settings(hwnd: HWND) {
             domain,
             check_interval: interval,
             wifi_ssid,
+            guard,
         };
         let _ = config::save(&cfg);
         let mut was_manual = false;
@@ -749,6 +752,12 @@ fn save_settings(hwnd: HWND) {
         crate::autostart::set(chk as u32 == BST_CHECKED);
         push_log("✓ 设置已保存");
         push_log(&format!("开机自启: {}", if crate::autostart::enabled() { "已启用" } else { "未启用" }));
+        // 进程守护即时生效(勾选=幂等孵化, 取消=立即击杀看门狗)
+        if guard {
+            crate::guard::spawn(false);
+        } else {
+            crate::guard::stop();
+        }
     }
 }
 
@@ -825,7 +834,7 @@ fn create_controls(hwnd: HWND) {
         mk("EDIT", "172.16.245.50", ID_SERVER, edit, 246, 122, 196, 24);
 
         // 分组 2: 监控与自启 —— 标题带占 y160~178, 内容自 y=182 起(修复与「间隔(秒)」重叠)
-        let g2 = mk("BUTTON", "监控与自启", 0, group, 8, 160, 438, 92);
+        let g2 = mk("BUTTON", "监控与自启", 0, group, 8, 160, 438, 122);
         SendMessageW(g2, WM_SETFONT, font_bold, 1);
         mk("STATIC", "间隔(秒)", 0, label, 16, 184, 56, 22);
         mk("EDIT", "20", ID_INTERVAL, edit, 78, 182, 52, 24);
@@ -834,16 +843,17 @@ fn create_controls(hwnd: HWND) {
         mk("STATIC", "WiFi名", 0, label, 16, 214, 56, 22);
         mk("EDIT", "SWPU-EDU", ID_WIFI, edit, 78, 212, 236, 24);
         mk("STATIC", "(留空=不自动连WiFi)", 0, label, 322, 216, 118, 20);
+        mk("BUTTON", "进程守护(异常退出后自动重启)", ID_CHK_GUARD, btn | BS_AUTOCHECKBOX as u32, 16, 244, 230, 22);
 
         // 分组 3: 运行日志(等宽字体, 配淡灰底)
-        let g3 = mk("BUTTON", "运行日志", 0, group, 8, 258, 438, 302);
+        let g3 = mk("BUTTON", "运行日志", 0, group, 8, 288, 438, 272);
         SendMessageW(g3, WM_SETFONT, font_bold, 1);
         let log = mk(
             "EDIT",
             "",
             ID_LOG,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE as u32 | ES_READONLY as u32,
-            20, 280, 414, 270,
+            20, 310, 414, 238,
         );
         SendMessageW(log, WM_SETFONT, font_mono, 1);
     }
@@ -863,6 +873,12 @@ pub fn run() -> ! {
     }));
     let _ = SHARED.set(shared.clone());
     push_log("程序已启动, 后台监控运行中");
+    // 进程守护: 在窗口创建前孵化, 连启动期崩溃也被覆盖; --watched 实例不再孵化(防增殖)
+    if crate::guard::is_watched() {
+        push_log("🛡 由进程守护自动重启");
+    } else if shared.lock().unwrap().cfg.guard {
+        crate::guard::spawn(false);
+    }
 
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
@@ -913,6 +929,8 @@ pub fn run() -> ! {
             SendMessageW(GetDlgItem(hwnd, ID_DOMAIN), CB_SETCURSEL, idx, 0);
             let chk = if crate::autostart::enabled() { BST_CHECKED as WPARAM } else { 0 };
             SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTO), BM_SETCHECK, chk, 0);
+            let g = if cfg.guard { BST_CHECKED as WPARAM } else { 0 };
+            SendMessageW(GetDlgItem(hwnd, ID_CHK_GUARD), BM_SETCHECK, g, 0);
         }
         init_tray_icons();
         add_tray(hwnd);

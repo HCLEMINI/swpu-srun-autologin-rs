@@ -7,6 +7,11 @@ target/
 # ── 运行时产物 ──
 srun_service.log
 
+# ── X99 网络看门狗(借用 release 目录, 不属本项目) ──
+net_watchdog.ps1
+net_watchdog_start.vbs
+net_watchdog.log
+
 # ── 编辑器/系统 ──
 .vscode/
 .idea/
