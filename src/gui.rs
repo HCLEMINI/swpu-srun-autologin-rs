@@ -169,6 +169,8 @@ pub struct Shared {
     /// 用户手动[断开]后暂停自动重连 —— 直到点[连接]/保存设置/检测到已在线才恢复。
     /// 否则注销后 ~20s 又被自动登录回来, 违背用户意愿
     pub manual_offline: bool,
+    /// 当前校园网会话介质(在线时由探测更新, 供状态行显示 有线/无线)
+    pub medium: crate::netinfo::Medium,
 }
 
 static SHARED: OnceLock<Arc<Mutex<Shared>>> = OnceLock::new();
@@ -313,6 +315,21 @@ fn status_of(st: srun::NetState) -> Status {
     }
 }
 
+/// 探测(包一层 srun::probe): 在线时同步判定会话介质,
+/// 供状态行「已连接(有线/无线)」显示 —— 线路后缀仍由用户手动选
+fn probe(server: &str) -> srun::NetState {
+    let (st, ip) = srun::probe(server);
+    if st == srun::NetState::Authenticated {
+        let m = crate::netinfo::medium_of_ip(ip.as_deref().unwrap_or(""));
+        if let Some(s) = SHARED.get() {
+            if let Ok(mut g) = s.lock() {
+                g.medium = m;
+            }
+        }
+    }
+    st
+}
+
 fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
     let mut last_state: Option<srun::NetState> = None;
     let mut fail: u64 = 0;
@@ -329,7 +346,7 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
                 ensure_wifi(&cfg);
                 let _ = do_login(&cfg);
                 // 登录后立即探测刷新状态(不等下一周期)
-                let st = srun::probe(&cfg.server);
+                let st = probe(&cfg.server);
                 set_status(status_of(st));
                 fail = if st == srun::NetState::Authenticated { 0 } else { fail + 1 };
                 // 不写 last_state: 让下一周期把「已连接」的恢复过程记进日志
@@ -349,7 +366,7 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
             }
             Ok(Cmd::Check) => {
                 let cfg = shared.lock().unwrap().cfg.clone();
-                let st = srun::probe(&cfg.server);
+                let st = probe(&cfg.server);
                 set_status(status_of(st));
                 push_log(match st {
                     srun::NetState::Authenticated => "当前: 在线(校园网已认证)",
@@ -375,7 +392,7 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
             let backoff = std::cmp::min(180, iv * (fail + 1));
             next_check = now_ms() + backoff as u128 * 1000;
 
-            let st = srun::probe(&cfg.server);
+            let st = probe(&cfg.server);
             if last_state != Some(st) {
                 push_log(match st {
                     srun::NetState::Authenticated => "✓ 校园网已连接",
@@ -405,18 +422,30 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
                     } else {
                         ensure_wifi(&cfg); // 断网先确保连上目标 WiFi(失败不阻塞: 有线用户不受影响)
                         // 门户不可达时登录注定失败(get_challenge 连的就是它), 不白发请求
-                        if srun::probe(&cfg.server) == srun::NetState::NeedLogin {
-                            if !do_login(&cfg) {
-                                fail += 1;
+                        if probe(&cfg.server) == srun::NetState::NeedLogin {
+                            let outcome = do_login(&cfg);
+                            // 立即复查刷新状态(不等下一周期); rad_user_info 权威探针毫秒级反映
+                            let st2 = probe(&cfg.server);
+                            if st2 == srun::NetState::Authenticated {
+                                fail = 0;
+                            } else {
+                                match outcome {
+                                    // 服务器已受理但探测暂未跟上: 5 秒短跟进, 不进长退避
+                                    srun::LoginOutcome::Ok => {
+                                        fail = 0;
+                                        next_check = now_ms() + 5_000;
+                                    }
+                                    // 会话残留窗口(清场重试已做仍败): 10 秒等门户状态收敛再试
+                                    srun::LoginOutcome::LoginError(_) => {
+                                        fail += 1;
+                                        next_check = now_ms() + 10_000;
+                                    }
+                                    srun::LoginOutcome::Failed(_) => fail += 1,
+                                }
                             }
+                            set_status(status_of(st2));
                         } else {
                             fail += 1;
-                        }
-                        // 立即复查刷新状态(不等下一周期)
-                        let st2 = srun::probe(&cfg.server);
-                        set_status(status_of(st2));
-                        if st2 == srun::NetState::Authenticated {
-                            fail = 0;
                         }
                         // 不写 last_state: 让下一周期把状态变化记进日志(否则恢复过程静默)
                     }
@@ -465,27 +494,20 @@ fn ensure_wifi(cfg: &Config) {
     }
 }
 
-fn do_login(cfg: &Config) -> bool {
+fn do_login(cfg: &Config) -> srun::LoginOutcome {
     if cfg.username.is_empty() || cfg.password.is_empty() {
         push_log("⚠ 尚未填写账号/密码, 请填写后点[保存设置]");
-        return false;
+        return srun::LoginOutcome::Failed("未配置账号".into());
     }
     set_status(Status::Busy);
     let c = client_from_cfg(cfg);
-    match c.login() {
-        Ok(e) if e == "ok" => {
-            push_log(&format!("✓ 登录成功 ({})", cfg.domain));
-            true
-        }
-        Ok(e) => {
-            push_log(&format!("✗ 登录失败: {}", e));
-            false
-        }
-        Err(e) => {
-            push_log(&format!("✗ 登录异常: {}", e));
-            false
-        }
+    let r = c.login_auto(|m| push_log(m));
+    match &r {
+        srun::LoginOutcome::Ok => push_log(&format!("✓ 登录成功 ({})", cfg.domain)),
+        srun::LoginOutcome::LoginError(e) => push_log(&format!("✗ 登录失败(会话残留): {}", e)),
+        srun::LoginOutcome::Failed(e) => push_log(&format!("✗ 登录失败: {}", e)),
     }
+    r
 }
 
 // ------------------------------------------------------------------ //
@@ -545,6 +567,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let id = (wparam & 0xFFFF) as i32;
             match id {
                 ID_BTN_CONN => {
+                    // 线路以界面当前所选为准: 只改下拉框不点[保存设置]时也立即生效
+                    // (历史坑: 登录用的是已保存配置, 用户以为切了线路实际没切)
+                    let sel = SendMessageW(GetDlgItem(hwnd, ID_DOMAIN), CB_GETCURSEL, 0, 0);
+                    if let Some(d) = DOMAINS.get(sel as usize).copied() {
+                        let changed = SHARED
+                            .get()
+                            .and_then(|s| s.lock().ok())
+                            .map(|mut g| {
+                                if g.cfg.domain != d {
+                                    g.cfg.domain = d.to_string();
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if changed {
+                            // 落盘用 shared 里的完整 cfg, 不读界面其他输入框(避免存进未完成的编辑)
+                            if let Some(s) = SHARED.get() {
+                                if let Ok(g) = s.lock() {
+                                    let _ = config::save(&g.cfg);
+                                }
+                            }
+                            push_log(&format!("线路已切换: {}", d));
+                        }
+                    }
                     if let Some(tx) = CMD_TX.get() {
                         let _ = tx.send(Cmd::Login);
                     }
@@ -672,9 +720,21 @@ fn current_manual() -> bool {
         .unwrap_or(false)
 }
 
+fn current_medium() -> crate::netinfo::Medium {
+    SHARED
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|g| g.medium)
+        .unwrap_or(crate::netinfo::Medium::Unknown)
+}
+
 fn update_status_ui(hwnd: HWND, status: Status) {
     let text = match status {
-        Status::Online => "● 已连接",
+        Status::Online => match current_medium() {
+            crate::netinfo::Medium::Wired => "● 已连接(有线)",
+            crate::netinfo::Medium::Wireless => "● 已连接(无线)",
+            crate::netinfo::Medium::Unknown => "● 已连接",
+        },
         Status::Busy => "● 连接中…",
         Status::OtherNet => "● 其他网络在线",
         Status::Offline => {
@@ -870,6 +930,7 @@ pub fn run() -> ! {
         status: Status::Offline,
         cfg,
         manual_offline: false,
+        medium: crate::netinfo::Medium::Unknown,
     }));
     let _ = SHARED.set(shared.clone());
     push_log("程序已启动, 后台监控运行中");

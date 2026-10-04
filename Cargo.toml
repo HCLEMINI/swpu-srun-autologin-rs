@@ -24,6 +24,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_NetworkManagement_WiFi",
     # WlanConnect 被 windows-sys 元数据误标在 Ndis feature 下
     "Win32_NetworkManagement_Ndis",
+    # 网卡地址表(判定会话走有线还是无线)
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
 ] }
 
 [profile.release]

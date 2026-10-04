@@ -26,12 +26,15 @@ fn client_from(cfg: &Config) -> SrunClient {
 
 fn cmd_check() -> i32 {
     let cfg = config::load();
-    let st = srun::probe(&cfg.server);
+    let (st, sip) = srun::probe(&cfg.server);
     let msg = match st {
-        srun::NetState::Authenticated => "在线(校园网已认证)",
-        srun::NetState::NeedLogin => "离线(在校园网, 尚未认证)",
-        srun::NetState::OtherNet => "在线(其他网络, 非校园网)",
-        srun::NetState::NoNet => "离线(无网络)",
+        srun::NetState::Authenticated => format!(
+            "在线(校园网已认证{})",
+            crate::netinfo::medium_of_ip(sip.as_deref().unwrap_or("")).suffix()
+        ),
+        srun::NetState::NeedLogin => "离线(在校园网, 尚未认证)".to_string(),
+        srun::NetState::OtherNet => "在线(其他网络, 非校园网)".to_string(),
+        srun::NetState::NoNet => "离线(无网络)".to_string(),
     };
     println!("{}", msg);
     match st {
@@ -114,16 +117,21 @@ fn run_headless() -> ! {
     let mut last_state: Option<srun::NetState> = None;
     let mut fail = 0u32;
     loop {
-        let st = srun::probe(&cfg.server);
+        let (st, sip) = srun::probe(&cfg.server);
         if last_state != Some(st) {
-            hlog(match st {
-                srun::NetState::Authenticated => "状态: 校园网已连接",
-                srun::NetState::NeedLogin => "状态: 校园网未认证, 尝试登录…",
-                srun::NetState::OtherNet => "状态: 其他网络已联网, 跳过校园网登录",
-                srun::NetState::NoNet => "状态: 无网络",
-            });
+            let msg = match st {
+                srun::NetState::Authenticated => format!(
+                    "状态: 校园网已连接{}",
+                    crate::netinfo::medium_of_ip(sip.as_deref().unwrap_or("")).suffix()
+                ),
+                srun::NetState::NeedLogin => "状态: 校园网未认证, 尝试登录…".to_string(),
+                srun::NetState::OtherNet => "状态: 其他网络已联网, 跳过校园网登录".to_string(),
+                srun::NetState::NoNet => "状态: 无网络".to_string(),
+            };
+            hlog(&msg);
             last_state = Some(st);
         }
+        let mut wait_override: Option<u64> = None;
         match st {
             srun::NetState::Authenticated | srun::NetState::OtherNet => fail = 0,
             srun::NetState::NeedLogin | srun::NetState::NoNet => {
@@ -139,19 +147,31 @@ fn run_headless() -> ! {
                     }
                 }
                 // 门户不可达时登录注定失败(get_challenge 连的就是它), 不白发请求
-                if srun::probe(&cfg.server) == srun::NetState::NeedLogin {
-                    match client.login() {
-                        Ok(e) if e == "ok" => {
+                if srun::probe(&cfg.server).0 == srun::NetState::NeedLogin {
+                    let outcome = client.login_auto(|m| hlog(m));
+                    // rad_user_info 权威探针立即复查
+                    if srun::probe(&cfg.server).0 == srun::NetState::Authenticated {
+                        if let srun::LoginOutcome::Ok = outcome {
                             hlog(&format!("✓ 登录成功 ({})", cfg.domain));
-                            fail = 0;
                         }
-                        Ok(e) => {
-                            hlog(&format!("✗ 登录失败: {}", e));
-                            fail += 1;
-                        }
-                        Err(e) => {
-                            hlog(&format!("✗ 登录异常: {}", e));
-                            fail += 1;
+                        fail = 0;
+                    } else {
+                        match outcome {
+                            // 服务器受理但探测暂未跟上: 5 秒短跟进
+                            srun::LoginOutcome::Ok => {
+                                fail = 0;
+                                wait_override = Some(5);
+                            }
+                            // 会话残留窗口(清场重试已做仍败): 10 秒等门户收敛
+                            srun::LoginOutcome::LoginError(e) => {
+                                hlog(&format!("✗ 登录失败(会话残留): {}", e));
+                                fail += 1;
+                                wait_override = Some(10);
+                            }
+                            srun::LoginOutcome::Failed(e) => {
+                                hlog(&format!("✗ 登录失败: {}", e));
+                                fail += 1;
+                            }
                         }
                     }
                 } else {
@@ -159,8 +179,9 @@ fn run_headless() -> ! {
                 }
             }
         }
-        // 退避: 连续失败时逐步拉长
-        let iv = std::cmp::min(180u64, cfg.check_interval.max(5) * (fail as u64 + 1));
+        // 退避: 连续失败逐步拉长; 短跟进场景(ok 未验证上=5s / 会话残留=10s)覆盖之
+        let iv = wait_override
+            .unwrap_or_else(|| std::cmp::min(180u64, cfg.check_interval.max(5) * (fail as u64 + 1)));
         std::thread::sleep(std::time::Duration::from_secs(iv));
     }
 }
@@ -260,4 +281,5 @@ mod autostart;
 mod guard;
 mod gui;
 mod logger;
+mod netinfo;
 mod shutdown;

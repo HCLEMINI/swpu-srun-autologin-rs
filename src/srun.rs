@@ -96,6 +96,26 @@ impl SrunClient {
             .to_string())
     }
 
+    /// 自动登录: 遇 login_error(典型为门户侧账号/IP 会话残留 —— 重启或注销后立即登录、
+    /// 服务端会话表尚未收敛)时, 先注销清场再立即重试一次, srun 社区标准解法。
+    /// 调用方经 log 回调收集中间过程日志
+    pub fn login_auto(&self, log: impl Fn(&str)) -> LoginOutcome {
+        match self.login() {
+            Ok(e) if e == "ok" => LoginOutcome::Ok,
+            Ok(e) if e == "login_error" => {
+                log("⚠ login_error(门户会话残留?), 注销清场后重试");
+                let _ = self.logout();
+                match self.login() {
+                    Ok(e) if e == "ok" => LoginOutcome::Ok,
+                    Ok(e) => LoginOutcome::LoginError(format!("重试仍失败: {}", e)),
+                    Err(e) => LoginOutcome::LoginError(format!("重试异常: {}", e)),
+                }
+            }
+            Ok(e) => LoginOutcome::Failed(e),
+            Err(e) => LoginOutcome::Failed(e),
+        }
+    }
+
     /// 注销
     pub fn logout(&self) -> Result<String, String> {
         let (token, ip) = self.get_challenge()?;
@@ -159,7 +179,7 @@ pub fn is_online() -> bool {
     }
 }
 
-/// 网络四态: 「门户可达(在不在校园网) × NCSI(有没有互联网)」联合判定
+/// 网络四态: 「门户会话(权威认证态) × NCSI(有没有互联网)」联合判定
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NetState {
     /// 校园网且已认证
@@ -172,18 +192,53 @@ pub enum NetState {
     NoNet,
 }
 
-/// 门户可达性 = 是否身处校园网。
-/// 服务器是 172.16.x.x 私网地址, 出了校园就不可路由 —— 有线无线通吃, 比 SSID 判定可靠
-pub fn portal_reachable(server: &str) -> bool {
-    http_get(server, 80, "/", 2000).is_ok()
+/// 登录结果分级: Ok=成功; LoginError=login_error 类(门户会话残留, 已清场重试仍败, 短退避);
+/// Failed=其他失败(常规线性退避)
+#[derive(Debug)]
+pub enum LoginOutcome {
+    Ok,
+    LoginError(String),
+    Failed(String),
 }
 
-/// 一次完整探测(门户 + NCSI 两个独立请求, 各自带超时)
-pub fn probe(server: &str) -> NetState {
-    match (portal_reachable(server), is_online()) {
-        (true, true) => NetState::Authenticated,
-        (true, false) => NetState::NeedLogin,
-        (false, true) => NetState::OtherNet,
-        (false, false) => NetState::NoNet,
+/// rad_user_info 解析: 在线时返回 Some(会话 IP) —— 首段为纯数字账号,
+/// 会话 IP 为其后第一个点分 IPv4 字段; 未在线返回 None(not_online/空串/非数字串)
+fn session_ip(body: &str) -> Option<String> {
+    let mut it = body.trim().split(',');
+    let first = it.next().unwrap_or("");
+    if first.len() < 4 || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    for f in it {
+        if f.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some(f.to_string());
+        }
+    }
+    Some(String::new())
+}
+
+/// 一次完整探测, 返回 (状态, 在线时的会话 IP)。
+/// 认证态以门户 rad_user_info 为权威 —— IP 直连不经域名解析, 无 NCSI 式缓存滞后,
+/// 登录成功毫秒级可感知(此前用 NCSI 判定, 曾因 DNS 劫持缓存滞后 62 秒误导用户去手动网页登录);
+/// 门户私网地址出了校园不可路由, 兼作"是否身处校园网"判定; NCSI 仅用于识别其他网络
+pub fn probe(server: &str) -> (NetState, Option<String>) {
+    match http_get(server, 80, "/cgi-bin/rad_user_info", 2000) {
+        Ok(body) => match session_ip(&body) {
+            Some(ip) => (NetState::Authenticated, Some(ip)),
+            None => {
+                if is_online() {
+                    (NetState::OtherNet, None)
+                } else {
+                    (NetState::NeedLogin, None)
+                }
+            }
+        },
+        Err(_) => {
+            if is_online() {
+                (NetState::OtherNet, None)
+            } else {
+                (NetState::NoNet, None)
+            }
+        }
     }
 }
