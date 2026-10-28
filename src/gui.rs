@@ -2,7 +2,7 @@
 //! 布局: 状态行[●状态][连接][断开][检测] / 账号 / 密码 / 线路·服务器 / 间隔·自启 / WiFi / 保存 / 日志
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -458,6 +458,11 @@ fn worker_loop(shared: Arc<Mutex<Shared>>, rx: mpsc::Receiver<Cmd>) {
 
 /// 关机/注销时提前退出登录(异步线程, 只发一次)
 static SHUTDOWN_LOGOUT_DONE: AtomicBool = AtomicBool::new(false);
+
+/// "TaskbarCreated" 广播消息 ID(RegisterWindowMessageW 返回值, 全系统唯一)。
+/// Explorer 重启或任务栏重建后, 所有托盘图标都被清空并广播此消息, 程序必须重新注册。
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
 fn fire_shutdown_logout() {
     if SHUTDOWN_LOGOUT_DONE.swap(true, Ordering::SeqCst) {
         return;
@@ -513,7 +518,10 @@ fn do_login(cfg: &Config) -> srun::LoginOutcome {
 // ------------------------------------------------------------------ //
 //  托盘
 // ------------------------------------------------------------------ //
-unsafe fn add_tray(hwnd: HWND) {
+/// 注册托盘图标, 返回是否成功。
+/// Explorer 的通知区域可能尚未就绪(登录瞬间被任务计划拉起), NIM_ADD 会失败,
+/// 旧版忽略返回值导致此后整个进程生命周期都没有图标, 因此必须由调用方重试。
+unsafe fn add_tray(hwnd: HWND) -> bool {
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
@@ -526,7 +534,23 @@ unsafe fn add_tray(hwnd: HWND) {
         nid.hIcon = LoadIconW(GetModuleHandleW(std::ptr::null()), IDI_APPLICATION);
     }
     set_tip(&mut nid, "校园网登录 · 检测中");
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    Shell_NotifyIconW(NIM_ADD, &nid) != 0
+}
+
+/// 后台重试注册托盘(最多约 20 秒), 不阻塞消息循环;
+/// 成功后由 500ms 定时器的 NIM_MODIFY 自动刷成真实状态图标。
+fn spawn_tray_retry(hwnd: HWND) {
+    let raw = hwnd as usize;
+    std::thread::spawn(move || unsafe {
+        let hwnd = raw as HWND;
+        for _ in 0..40 {
+            if add_tray(hwnd) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        push_log("⚠ 托盘图标注册失败: 桌面通知区域未就绪");
+    });
 }
 
 unsafe fn remove_tray(hwnd: HWND) {
@@ -698,6 +722,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             PostQuitMessage(0);
+            0
+        }
+        // Explorer 重启 / 任务栏重建: 系统会广播 TaskbarCreated, 补注册托盘图标
+        m if {
+            let t = TASKBAR_CREATED.load(Ordering::Relaxed);
+            t != 0 && m == t
+        } =>
+        {
+            add_tray(hwnd);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -994,7 +1027,13 @@ pub fn run() -> ! {
             SendMessageW(GetDlgItem(hwnd, ID_CHK_GUARD), BM_SETCHECK, g, 0);
         }
         init_tray_icons();
-        add_tray(hwnd);
+        // 登录瞬间 explorer 的通知区域往往还没建好: 后台带重试注册, 不阻塞首帧
+        spawn_tray_retry(hwnd);
+        // 监听 explorer 的 "TaskbarCreated" 广播, 任务栏重建后自动补回图标
+        TASKBAR_CREATED.store(
+            RegisterWindowMessageW(w("TaskbarCreated").as_ptr()),
+            Ordering::Relaxed,
+        );
         SetTimer(hwnd, WM_TIMER_POLL, 500, None);
 
         // 启动监控线程
